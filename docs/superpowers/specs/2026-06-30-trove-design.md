@@ -1,8 +1,8 @@
-# SkillWallet — Design Document
+# Trove — Design Document
 
 **Date:** 2026-06-30
 **Status:** Design approved; pending implementation plan
-**Working name:** SkillWallet (placeholder — naming is a deferred decision)
+**Product name:** Trove · **Domain:** trove.io (`.co`/`.me`/`.so` available as backups)
 
 ---
 
@@ -22,7 +22,7 @@ infrastructure connecting education to workforce outcomes by:
 
 This priority is **invitational** (N/A points — it signals alignment with the Secretary's
 scored Absolute/Competitive priorities but does not itself add to an application's score).
-No product on the market cleanly fills this gap, which is the opportunity SkillWallet
+No product on the market cleanly fills this gap, which is the opportunity Trove
 addresses.
 
 **Key strategic decisions made during brainstorming:**
@@ -60,7 +60,7 @@ does not issue them) and **adds intelligence** on top.
 
 1. Sponsor invites a cohort → earners onboard free.
 2. Earner imports credentials (OB 2.x/3.0 / VC by file or URL, or manual entry).
-3. SkillWallet extracts a **structured skills profile** (O\*NET-normalized).
+3. Trove extracts a **structured skills profile** (O\*NET-normalized).
 4. Earner opens the **AI advisor**, which knows their verified skills and answers
    career/learning questions, surfacing job directions and next-credential suggestions inline.
 5. Earner publishes a **verifiable public profile** to share with employers.
@@ -101,7 +101,7 @@ Next.js app (Vercel)
   info rather than a paid jobs API.
 - **Verification is cryptographic / issuer-side, not a DB lookup.** A public profile proves
   credentials are real by validating the OB3.0/VC signature (or OB2.x hosted-assertion
-  `verify` URL) against the issuer — works even for issuers who never heard of SkillWallet.
+  `verify` URL) against the issuer — works even for issuers who never heard of Trove.
 
 **Stack:** Next.js + Supabase (Postgres/RLS/Auth/Storage) + Vercel + **Stripe** (billing) +
 **Postmark** (email) + **Claude Sonnet 4.6** (advisor + skills extraction; Opus only if a
@@ -218,9 +218,9 @@ flags when reasoning relies on an *unverified* credential.
   skills-verified candidates / post opportunities. Requires liquidity first.
 
 **Grant tie-back (the wedge):** a sponsor that is a TRIO/EOC grantee (or any workforce/education
-program) can point to SkillWallet as the concrete tool delivering the "AI-enabled learner wallet
+program) can point to Trove as the concrete tool delivering the "AI-enabled learner wallet
 + LER + common currency of skills" the Talent Marketplaces invitational priority describes —
-without SkillWallet being locked into the TRIO market.
+without Trove being locked into the TRIO market.
 
 ---
 
@@ -285,7 +285,9 @@ given the audience); SSO / advanced sponsor admin roles.
 
 - **Business model stays flexible** — sponsor per-seat is the working primary; revisit if a
   better model emerges.
-- **Naming** — "SkillWallet" is a placeholder; real name TBD.
+- **Trademark** — "Trove" is a somewhat common brand word (existing non-competing uses in
+  recommerce/fintech). Domain securable at trove.io; run a USPTO + state trademark check in the
+  **education-software class** before committing spend.
 - **O\*NET subset scope** — which occupations/skills to seed first (likely tied to the first
   pilot sponsor's population) is a v1 planning detail.
 - **Pricing specifics** — per-seat price points and tiers TBD.
