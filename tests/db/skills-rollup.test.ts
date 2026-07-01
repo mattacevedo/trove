@@ -34,6 +34,15 @@ async function twoSeededSkillIds(): Promise<[string, string]> {
   return [vocab[0].id, vocab[1].id];
 }
 
+async function addCredential(earnerId: string): Promise<string> {
+  const { data: cred } = await admin
+    .from("credentials")
+    .insert({ earner_id: earnerId, source: "manual", title: "Test Cred 2" })
+    .select("id")
+    .single();
+  return cred!.id as string;
+}
+
 function match(skillId: string, confidence: number): NormalizedSkillMatch {
   return { candidate: "x", skillId, confidence, method: "exact" };
 }
@@ -80,6 +89,43 @@ test("no credential_skills -> skillCount 0, no rows", async () => {
   const { earnerId } = await seedEarnerWithCredential();
   const { skillCount } = await recomputeEarnerSkills(admin, earnerId);
   expect(skillCount).toBe(0);
+});
+
+test("recompute counts distinct contributing credentials, not distinct credential_skills rows", async () => {
+  // Regression guard: recomputeEarnerSkills must group credential_skills by credential_id
+  // before rolling up. If it regressed to grouping by skill_id instead, source_count would
+  // stay 1 here even though two separate credentials each contribute the same skill.
+  const { earnerId, credentialId: credentialId1 } = await seedEarnerWithCredential();
+  const credentialId2 = await addCredential(earnerId);
+  const [s1] = await twoSeededSkillIds();
+
+  await writeCredentialSkills(admin, credentialId1, [match(s1, 0.6)]);
+  await writeCredentialSkills(admin, credentialId2, [match(s1, 0.85)]);
+
+  const { skillCount } = await recomputeEarnerSkills(admin, earnerId);
+  expect(skillCount).toBe(1);
+
+  const { data } = await admin
+    .from("earner_skills")
+    .select("skill_id, source_count, highest_confidence")
+    .eq("earner_id", earnerId);
+  expect(data).toHaveLength(1);
+  expect(data![0].skill_id).toBe(s1);
+  expect(data![0].source_count).toBe(2);
+  expect(data![0].highest_confidence).toBeCloseTo(0.85);
+
+  // Dropping one credential's contribution should bring the count back down to 1, proving
+  // recompute fully re-aggregates from current state rather than accumulating.
+  await writeCredentialSkills(admin, credentialId2, []);
+  const { skillCount: skillCountAfter } = await recomputeEarnerSkills(admin, earnerId);
+  expect(skillCountAfter).toBe(1);
+  const { data: dataAfter } = await admin
+    .from("earner_skills")
+    .select("skill_id, source_count, highest_confidence")
+    .eq("earner_id", earnerId);
+  expect(dataAfter).toHaveLength(1);
+  expect(dataAfter![0].source_count).toBe(1);
+  expect(dataAfter![0].highest_confidence).toBeCloseTo(0.6);
 });
 
 test("earner A recompute never writes earner B rows", async () => {
