@@ -428,15 +428,21 @@ git commit -m "feat: design tokens, fonts, Button and VerificationBadge primitiv
 
 ---
 
-### Task 3: Supabase local environment + extensions migration
+### Task 3: Hosted Supabase project link + extensions migration
+
+> **No Docker.** This task links the CLI to a hosted Supabase free-tier project and applies
+> migrations remotely with `supabase db push`. The project must already exist and its
+> credentials must be present in `.env.local` (the human operator provides these — see the
+> "Human setup" note at the end of the plan). A subagent running this task should **stop and
+> report** if `.env.local` is missing the Supabase values or if `supabase link` has not been run.
 
 **Files:**
 - Create: `supabase/config.toml` (generated), `supabase/migrations/<ts>_extensions.sql`, `.env.local`, `.env.example`
 - Modify: `.gitignore` (ensure `.env*` ignored — already present)
 
 **Interfaces:**
-- Consumes: nothing
-- Produces: a running local Postgres (Supabase) with `pgcrypto` + `citext` enabled; `.env.local` with `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`
+- Consumes: a hosted Supabase project (URL + anon key + service_role key + project ref + db password), provided by the human operator
+- Produces: a linked, migrated hosted Postgres with `pgcrypto` + `citext` enabled; `.env.local` with `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `NEXT_PUBLIC_SITE_URL`
 
 - [ ] **Step 1: Install the Supabase CLI and init**
 
@@ -445,24 +451,26 @@ npm install -D supabase
 npx supabase init
 ```
 
-Expected: creates `supabase/config.toml` and `supabase/` folder. Accept defaults; if asked about VS Code settings, choose no.
+Expected: creates `supabase/config.toml` and `supabase/` folder. Accept defaults; if asked about VS Code settings, choose no. (This does NOT start Docker.)
 
-- [ ] **Step 2: Start the local stack (requires Docker running)**
+- [ ] **Step 2: Log in and link to the hosted project**
 
 ```bash
-npx supabase start
+npx supabase login            # opens a browser to authorize the CLI
+npx supabase link --project-ref <PROJECT_REF>   # ref is in the project's dashboard URL
 ```
 
-Expected: prints `API URL`, `anon key`, and `service_role key`. If Docker is not running, start Docker Desktop first.
+Expected: "Finished supabase link." The CLI will prompt for the database password (set when the project was created). `<PROJECT_REF>` is the 20-char id in `https://supabase.com/dashboard/project/<PROJECT_REF>`.
 
-- [ ] **Step 3: Write `.env.local` and `.env.example` from the printed values**
+- [ ] **Step 3: Confirm `.env.local` and write `.env.example`**
 
-`.env.local` (real values from Step 2 output):
+`.env.local` (values from the project's dashboard → Project Settings → API; **provided by the human operator**, do not invent):
 
 ```
-NEXT_PUBLIC_SUPABASE_URL=http://127.0.0.1:54321
-NEXT_PUBLIC_SUPABASE_ANON_KEY=<anon key from supabase start>
-SUPABASE_SERVICE_ROLE_KEY=<service_role key from supabase start>
+NEXT_PUBLIC_SUPABASE_URL=https://<PROJECT_REF>.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=<anon public key>
+SUPABASE_SERVICE_ROLE_KEY=<service_role secret key>
+NEXT_PUBLIC_SITE_URL=http://localhost:3000
 ```
 
 `.env.example` (committed, no secrets):
@@ -471,10 +479,13 @@ SUPABASE_SERVICE_ROLE_KEY=<service_role key from supabase start>
 NEXT_PUBLIC_SUPABASE_URL=
 NEXT_PUBLIC_SUPABASE_ANON_KEY=
 SUPABASE_SERVICE_ROLE_KEY=
+NEXT_PUBLIC_SITE_URL=http://localhost:3000
 POSTMARK_SERVER_TOKEN=
 ANTHROPIC_API_KEY=
 STRIPE_SECRET_KEY=
 ```
+
+Verify the values load: `node -e "require('dotenv').config({path:'.env.local'}); console.log(!!process.env.SUPABASE_SERVICE_ROLE_KEY)"` → expected `true`.
 
 - [ ] **Step 4: Create the extensions migration**
 
@@ -489,19 +500,19 @@ create extension if not exists pgcrypto;   -- gen_random_uuid()
 create extension if not exists citext;     -- case-insensitive handle/email
 ```
 
-- [ ] **Step 5: Apply migrations and verify**
+- [ ] **Step 5: Push the migration to the hosted project and verify**
 
 ```bash
-npx supabase db reset
+npx supabase db push
 ```
 
-Expected: reset runs the extensions migration with no error and prints "Finished supabase db reset".
+Expected: applies the extensions migration to the linked remote and prints "Finished supabase db push." (`db push` applies only pending migrations; safe to re-run.)
 
 - [ ] **Step 6: Commit (migrations + config only; `.env.local` stays ignored)**
 
 ```bash
 git add supabase/ .env.example package.json package-lock.json
-git commit -m "chore: supabase local env and extensions migration"
+git commit -m "chore: link hosted supabase project and add extensions migration"
 ```
 
 ---
@@ -631,10 +642,10 @@ create table advisor_messages (
 create index advisor_messages_thread_idx on advisor_messages (thread_id);
 ```
 
-- [ ] **Step 2: Apply the migration**
+- [ ] **Step 2: Push the migration to the hosted project**
 
-Run: `npx supabase db reset`
-Expected: both migrations apply cleanly, "Finished supabase db reset".
+Run: `npx supabase db push`
+Expected: the core_schema migration applies to the linked remote, "Finished supabase db push".
 
 - [ ] **Step 3: Write the test admin client helper `tests/db/admin-client.ts`**
 
@@ -708,7 +719,7 @@ test("core tables exist and accept a minimal insert", async () => {
 - [ ] **Step 5: Run the test to verify it passes**
 
 Run: `npm test -- tests/db/schema.test.ts`
-Expected: 1 passed (requires `supabase start` running).
+Expected: 1 passed (requires the linked hosted Supabase project reachable and `.env.local` populated).
 
 - [ ] **Step 6: Commit**
 
@@ -827,10 +838,10 @@ create policy earner_skills_sponsor_select on earner_skills
   );
 ```
 
-- [ ] **Step 2: Apply the migration**
+- [ ] **Step 2: Push the migration to the hosted project**
 
-Run: `npx supabase db reset`
-Expected: all three migrations apply cleanly.
+Run: `npx supabase db push`
+Expected: the rls_policies migration applies to the linked remote, "Finished supabase db push".
 
 - [ ] **Step 3: Write the test user-client helper `tests/db/user-client.ts`**
 
@@ -1306,9 +1317,25 @@ git commit -m "feat: passwordless OTP auth, earner provisioning, protected app s
 
 **Type consistency:** `createServerClient()` (async) used consistently in server.ts, actions.ts, confirm/route.ts, app/layout.tsx; `provisionEarner(db, userId, email)` signature matches its test; table/column names match between Task 4 schema, Task 5 policies, and Task 6 inserts (`earners.handle`, `credentials.earner_id`, `cohort_members.consent_share_skills`). ✅
 
-**Known environmental dependency:** Tasks 4–6 DB tests require `npx supabase start` (Docker) running. This is stated in each relevant task.
+**Known environmental dependency:** Tasks 3–6 use a **hosted Supabase project** (no Docker). Tasks 4–6 DB tests require the project linked (`supabase link`) and `.env.local` populated with its URL + keys. Migrations are applied with `supabase db push`. This is stated in each relevant task.
 
 ---
+
+## Human Setup (hosted Supabase — required before Task 3)
+
+The operator (not a subagent) must do this once, because it needs a browser login and secret keys:
+
+1. Go to https://supabase.com → sign in → **New project**. Name it `trove` (or similar), pick a
+   region near you, and **save the database password** it makes you set.
+2. Wait for provisioning (~2 min). Then open **Project Settings → API** and copy:
+   - **Project URL** → `NEXT_PUBLIC_SUPABASE_URL`
+   - **anon public** key → `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+   - **service_role** key (secret) → `SUPABASE_SERVICE_ROLE_KEY`
+3. The **project ref** is the id in the dashboard URL (`.../project/<REF>`), used by `supabase link`.
+4. Paste the three values into `.env.local` (Task 3 Step 3). Keep the service_role key secret —
+   it bypasses RLS and must never reach the browser or git.
+
+Tasks 1–2 (frontend) do not need any of this and can proceed in parallel.
 
 ## Next Plans (written when this one is executed and its realities are known)
 
