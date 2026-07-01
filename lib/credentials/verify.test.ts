@@ -155,6 +155,53 @@ test("VC JWT: expired -> failed", async () => {
   expect(res.status).toBe("failed");
 });
 
+test("VC JWT: expiry is deterministic via injectable clock (not wall-clock dependent)", async () => {
+  // signedVc has a 1h expiry set at beforeAll-time. Inject a clock far in the future,
+  // well after that exp, so the expiry check is driven by opts.clock, not real time.
+  const farFuture = () => new Date(Date.now() + 1000 * 60 * 60 * 24 * 365);
+  const res = await verifyCredential(
+    { source: "ob_url", raw_json: signedVc },
+    { clock: farFuture }
+  );
+  expect(res.status).toBe("failed");
+});
+
+test("VC JWT: signed by key A but claimed kid is key B's did:key -> failed (not verified)", async () => {
+  // Two distinct Ed25519 keypairs. Sign with A's private key, but publish a did:key/kid
+  // derived from B's public key. A verifier that only checks "is this a valid EdDSA
+  // signature under *some* key" would wrongly accept; the JWT's kid must be resolved to
+  // its OWN public key and checked against THAT signature.
+  const keyA = await generateKeyPair("EdDSA", { crv: "Ed25519", extractable: true });
+  const keyB = await generateKeyPair("EdDSA", { crv: "Ed25519", extractable: true });
+
+  const jwkB = await exportJWK(keyB.publicKey);
+  const rawXB = Buffer.from(jwkB.x as string, "base64url");
+  const prefixedB = Buffer.concat([Buffer.from([0xed, 0x01]), rawXB]);
+  const didB = `did:key:${base58btc.encode(prefixedB)}`;
+  const kidB = `${didB}#${didB.slice("did:key:".length)}`;
+
+  const wrongKeyJwt = await new SignJWT({ vc: { type: ["VerifiableCredential"] } })
+    .setProtectedHeader({ alg: "EdDSA", kid: kidB }) // claims to be key B...
+    .setIssuedAt()
+    .setExpirationTime("1h")
+    .sign(keyA.privateKey); // ...but is actually signed by key A.
+
+  const res = await verifyCredential({ source: "ob_url", raw_json: wrongKeyJwt });
+  expect(res.status).toBe("failed");
+  expect(res.status).not.toBe("verified");
+});
+
+test("VC JWT: unsecured alg:none token -> not verified (downgrade rejected)", async () => {
+  const header = Buffer.from(JSON.stringify({ alg: "none" })).toString("base64url");
+  const payload = Buffer.from(
+    JSON.stringify({ vc: { type: ["VerifiableCredential"] } })
+  ).toString("base64url");
+  const noneJwt = `${header}.${payload}.`; // empty signature segment
+
+  const res = await verifyCredential({ source: "ob_url", raw_json: noneJwt });
+  expect(res.status).not.toBe("verified");
+});
+
 // ---- honest fall-throughs ----
 test("manual source is always unverified and never fetches", async () => {
   const fetchImpl = vi.fn() as unknown as typeof fetch;

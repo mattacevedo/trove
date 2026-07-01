@@ -66,7 +66,7 @@ export function detectJwt(rawJson: unknown): string | null {
   return null;
 }
 
-async function verifyJwt(jwt: string): Promise<VerifyResult> {
+async function verifyJwt(jwt: string, opts?: VerifyOpts): Promise<VerifyResult> {
   try {
     const decodeHeader = (): Record<string, unknown> => {
       const [encodedHeader] = jwt.split(".");
@@ -80,7 +80,13 @@ async function verifyJwt(jwt: string): Promise<VerifyResult> {
       return result("unverified", "none", "unsupported verification method");
     }
     const key = await importJWK(jwk, "EdDSA");
-    await jwtVerify(jwt, key); // throws on bad signature or expiry
+    // Pin the accepted algorithm explicitly rather than relying solely on jose's internal
+    // key-type inference — belt-and-suspenders against alg-confusion/downgrade. Also wire the
+    // injectable clock (when provided) so expiry checks are deterministic under test.
+    await jwtVerify(jwt, key, {
+      algorithms: ["EdDSA"],
+      ...(opts?.clock ? { currentDate: opts.clock() } : {}),
+    }); // throws on bad signature, wrong alg, or expiry
     return result("verified", "vc_jwt", "did:key EdDSA signature valid");
   } catch (e) {
     return result("failed", "vc_jwt", (e as Error).message);
@@ -145,7 +151,7 @@ export async function verifyCredential(
   const fetchImpl = opts?.fetchImpl ?? fetch;
 
   const jwt = detectJwt(input.raw_json);
-  if (jwt) return verifyJwt(jwt);
+  if (jwt) return verifyJwt(jwt, opts);
 
   const hosted = detectHostedVerify(input.raw_json);
   if (hosted) return verifyHosted(hosted.url, assertionId(input.raw_json), fetchImpl);
