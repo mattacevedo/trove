@@ -16,22 +16,28 @@ if (!file) {
   process.exit(1);
 }
 
-const query = readFileSync(file, "utf8");
-const res = await fetch(
-  `https://api.supabase.com/v1/projects/${ref}/database/query`,
-  {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ query }),
-  }
-);
+try {
+  const query = readFileSync(file, "utf8");
+  const res = await fetch(
+    `https://api.supabase.com/v1/projects/${ref}/database/query`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ query }),
+    }
+  );
 
-const text = await res.text();
-if (!res.ok) {
-  console.error(`FAILED (${res.status}) applying ${file}:\n${text}`);
+  const text = await res.text();
+  if (!res.ok) {
+    console.error(`FAILED (${res.status}) applying ${file}:\n${text}`);
+    process.exit(1);
+  }
+  console.log(`Applied ${file}. Response: ${text}`);
+} catch (e) {
+  console.error(`Error applying ${file}: ${e.message}`);
   process.exit(1);
 }
-console.log(`Applied ${file}. Response: ${text}`);
+
