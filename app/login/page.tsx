@@ -9,13 +9,13 @@ export default async function LoginPage({
   const params = await searchParams;
   return (
     <main className="mx-auto max-w-sm px-4 py-16">
-      <h1 className="font-heading text-3xl font-bold">Sign in to Trove</h1>
+      <h1 id="login-heading" className="font-heading text-3xl font-bold">Sign in to Trove</h1>
       {params.sent ? (
         <p className="mt-4 text-foreground/80" role="status">
           Check your email for a sign-in link.
         </p>
       ) : (
-        <form action={sendOtp} className="mt-6 space-y-4">
+        <form action={sendOtp} aria-labelledby="login-heading" className="mt-6 space-y-4">
           <div>
             <label htmlFor="email" className="block text-sm font-medium">
               Email

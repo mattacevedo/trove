@@ -11,11 +11,12 @@ export async function provisionEarner(
   userId: string,
   email: string
 ): Promise<{ handle: string }> {
-  const { data: existing } = await db
+  const { data: existing, error: readError } = await db
     .from("earners")
     .select("handle")
     .eq("id", userId)
     .maybeSingle();
+  if (readError) throw readError;
 
   if (existing) return { handle: existing.handle };
 

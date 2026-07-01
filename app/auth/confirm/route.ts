@@ -17,7 +17,11 @@ export async function GET(request: NextRequest) {
         data: { user },
       } = await supabase.auth.getUser();
       if (user?.email) {
-        await provisionEarner(supabase, user.id, user.email);
+        try {
+          await provisionEarner(supabase, user.id, user.email);
+        } catch {
+          return NextResponse.redirect(new URL("/login?error=1", request.url));
+        }
       }
       return NextResponse.redirect(new URL("/app", request.url));
     }
