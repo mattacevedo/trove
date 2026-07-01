@@ -88,6 +88,58 @@ test("null / non-object / unrecognized input returns a safe empty shape (never t
   expect(parseOpenBadge({ foo: "bar" })).toEqual(empty);
 });
 
+test("OB3.0/VC falls back to root-level description when achievement has none", () => {
+  const raw = {
+    type: ["VerifiableCredential", "OpenBadgeCredential"],
+    description: "Summary lives at the root of this envelope.",
+    issuer: { name: "Future State College" },
+    credentialSubject: {
+      achievement: {
+        name: "Project Management",
+      },
+    },
+  };
+  const out = parseOpenBadge(raw);
+  expect(out.title).toBe("Project Management");
+  expect(out.description).toBe("Summary lives at the root of this envelope.");
+});
+
+test("an incidental empty badge object does not shadow a valid envelope", () => {
+  const withTopLevelName = {
+    badge: {},
+    type: "BadgeClass",
+    name: "Data Literacy",
+    issuer: { name: "OpenU" },
+  };
+  expect(parseOpenBadge(withTopLevelName).title).toBe("Data Literacy");
+
+  const withAchievement = {
+    badge: { foo: 1 },
+    credentialSubject: {
+      achievement: { name: "Customer Service" },
+    },
+  };
+  expect(parseOpenBadge(withAchievement).title).toBe("Customer Service");
+});
+
+test("OB2.x BadgeClass falls back to issuanceDate/validFrom when issuedOn is absent", () => {
+  const withIssuanceDate = {
+    type: "BadgeClass",
+    name: "Data Literacy",
+    issuer: { name: "OpenU" },
+    issuanceDate: "2025-06-01T00:00:00Z",
+  };
+  expect(parseOpenBadge(withIssuanceDate).issuedDate).toBe("2025-06-01");
+
+  const withValidFrom = {
+    type: "BadgeClass",
+    name: "Data Literacy",
+    issuer: { name: "OpenU" },
+    validFrom: "2025-07-04",
+  };
+  expect(parseOpenBadge(withValidFrom).issuedDate).toBe("2025-07-04");
+});
+
 test("an empty title is the guard predicate: unrecognized envelopes yield no title", () => {
   // importByUrl / importByFile use `!parseOpenBadge(raw).title` as the "don't persist a garbage
   // row" guard. Assert that a valid-JSON-but-unrelated object and an empty object both fail it,

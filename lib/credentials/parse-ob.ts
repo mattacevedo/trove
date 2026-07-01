@@ -44,7 +44,7 @@ export function parseOpenBadge(rawJson: unknown): ParsedCredential {
 
   // OB2.x Assertion: name/description live under badge; date is issuedOn.
   const badge = asRecord(root.badge);
-  if (badge) {
+  if (badge && (str(badge.name) || str(badge.description))) {
     return {
       title: str(badge.name),
       issuerName: issuerName(badge.issuer),
@@ -65,7 +65,7 @@ export function parseOpenBadge(rawJson: unknown): ParsedCredential {
         title: str(achievement.name) || str(root.name),
         issuerName: issuerName(root.issuer),
         issuedDate: isoDate(root.issuanceDate) ?? isoDate(root.validFrom),
-        description: str(achievement.description),
+        description: str(achievement.description) || str(root.description),
       };
     }
   }
