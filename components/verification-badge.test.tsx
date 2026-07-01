@@ -16,3 +16,8 @@ test("unverified badge icon is decorative (aria-hidden)", () => {
   const { container } = render(<VerificationBadge status="unverified" />);
   expect(container.querySelector("svg")).toHaveAttribute("aria-hidden", "true");
 });
+
+test("unverified badge shows text label", () => {
+  render(<VerificationBadge status="unverified" />);
+  expect(screen.getByText("Unverified")).toBeInTheDocument();
+});
