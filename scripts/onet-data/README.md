@@ -1,54 +1,41 @@
 # O*NET source data (gitignored)
 
-Place the three tab-delimited O*NET Database text files here (they are **gitignored**):
+This directory holds the O*NET Database "Text Files" release, which `node
+scripts/seed-onet.mjs` reads directly. Contents are **gitignored** (large, external,
+redownloadable).
 
-- `Occupation Data.txt`
-- `Skills.txt`
-- `Technology Skills.txt`
+## Setup
 
-Download the "Text Files" ZIP from:
-https://www.onetcenter.org/database.html#individual-files
+1. Download the Text Files ZIP:
+   https://www.onetcenter.org/dl_files/database/db_30_3_text.zip
 
-Direct URL used at seed time:
-https://www.onetcenter.org/dl_files/database/db_30_3_text.zip
+   (Also linked from https://www.onetcenter.org/database.html#individual-files)
 
-Release used at seed time: **O*NET database 30.3** (`db_30_3`), retrieved **2026-07-01**.
-Update this line when you re-seed with a newer release — the parsers do not hardcode a
-version check and tolerate any release with the same file shape.
+2. Unzip it directly into `scripts/onet-data/`.
 
-## Content-model change in 30.3 (May 2026 release) — file prep required
+3. Run the seed:
 
-As of the 30.3 "Text Files" ZIP, O*NET no longer ships `Skills.txt` or
-`Technology Skills.txt` directly. The ZIP instead contains:
+   ```bash
+   node scripts/seed-onet.mjs
+   ```
 
-- `Essential Skills.txt` and `Transferable Skills.txt` (the old unified "Skills" domain
-  split into basic-skills 2.A.x and cross-functional 2.B.x element groups — same column
-  shape as the old `Skills.txt`: `O*NET-SOC Code`, `Element ID`, `Element Name`,
-  `Scale ID`, `Data Value`, ...). Together they cover the full fixed ~35-element Skills
-  taxonomy (10 + 25 elements as of 30.3).
-- `Software Skills.txt` (the old `Technology Skills.txt` renamed, with its tool-name
-  column renamed `Example` -> `Workplace Example`, plus a new `In Demand` column added).
-  `Hot Technology` is unchanged.
+No manual file renaming or editing is required — `scripts/seed-onet.mjs` resolves
+whichever file names are present in the release you downloaded (see next section) and
+`lib/skills/onet-parse.ts` tolerates the corresponding column-name differences.
 
-Because `lib/skills/onet-parse.ts` is a pure module with no filesystem/network access,
-it stays name-agnostic by design — do NOT special-case the 30.3 filenames inside the
-parser. Instead, build the three brief-shaped files this README documents by hand from
-the ZIP contents before running `node scripts/seed-onet.mjs`:
+## Release used at seed time
 
-```bash
-# from the unzipped db_30_3_text/ directory, writing into scripts/onet-data/
-cp "Occupation Data.txt" "scripts/onet-data/Occupation Data.txt"
+**O*NET database 30.3** (`db_30_3`), retrieved **2026-07-01**.
 
-{ head -1 "Essential Skills.txt"; tail -n +2 "Essential Skills.txt"; tail -n +2 "Transferable Skills.txt"; } \
-  > "scripts/onet-data/Skills.txt"
+As of 30.3, the ZIP no longer ships `Skills.txt` or `Technology Skills.txt` directly;
+it ships `Essential Skills.txt` + `Transferable Skills.txt` (which together form the
+same ~35-element Skills taxonomy) and `Software Skills.txt` (the same data as the old
+`Technology Skills.txt`, with its tool-name column renamed `Example` -> `Workplace
+Example`). `scripts/seed-onet.mjs` detects which set of files is present and parses
+accordingly; it also still supports the older `Skills.txt` / `Technology Skills.txt`
+names if a future or past release uses them.
 
-{ head -1 "Software Skills.txt" | sed 's/Workplace Example/Example/'; tail -n +2 "Software Skills.txt"; } \
-  > "scripts/onet-data/Technology Skills.txt"
-```
-
-If a future O*NET release reverts to (or keeps) plain `Skills.txt` / `Technology
-Skills.txt` files with the classic column names, just copy them in directly — no prep
-needed.
+Update this line when re-seeding with a newer release.
 
 Attribution (required): This product incorporates information from the O*NET Database by the
 U.S. Department of Labor, Employment and Training Administration (USDOL/ETA). O*NET(R) is a

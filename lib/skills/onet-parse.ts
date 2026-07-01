@@ -89,7 +89,9 @@ export function parseTechnologySkills(
   const out: SeedRow[] = [];
   for (const row of parseTable(text)) {
     const code = row["O*NET-SOC Code"];
-    const example = row["Example"];
+    // O*NET 30.3 renamed Technology Skills.txt -> Software Skills.txt and its tool-name
+    // column Example -> Workplace Example. Tolerate both known column names.
+    const example = row["Example"] ?? row["Workplace Example"];
     const hot = row["Hot Technology"];
     if (!code || !example || hot !== "Y" || !allowlist.has(code)) continue;
     const name = example.trim();
