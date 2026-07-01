@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, test } from "vitest";
 import { AddCredentialLauncher } from "./add-credential-launcher";
@@ -33,4 +33,36 @@ test("the dialog exposes URL, File, and Manual tabs", async () => {
   expect(screen.getByRole("tab", { name: /url/i })).toBeInTheDocument();
   expect(screen.getByRole("tab", { name: /file/i })).toBeInTheDocument();
   expect(screen.getByRole("tab", { name: /manual/i })).toBeInTheDocument();
+});
+
+test("Tab from the last focusable element wraps focus to the first focusable element", async () => {
+  const user = userEvent.setup();
+  render(<AddCredentialLauncher />);
+  await user.click(screen.getByRole("button", { name: /add credential/i }));
+
+  // On the default (URL) tab, the last focusable element in the dialog is the form's submit
+  // button; the first is the selected (URL) tab.
+  const urlTab = screen.getByRole("tab", { name: /url/i });
+  const dialog = screen.getByRole("dialog");
+  const submitButton = within(dialog).getByRole("button", { name: /^add credential$/i });
+  submitButton.focus();
+  expect(document.activeElement).toBe(submitButton);
+
+  await user.tab();
+  expect(document.activeElement).toBe(urlTab);
+});
+
+test("Shift+Tab from the first focusable element wraps focus to the last focusable element", async () => {
+  const user = userEvent.setup();
+  render(<AddCredentialLauncher />);
+  await user.click(screen.getByRole("button", { name: /add credential/i }));
+
+  // Focus starts on the first (URL) tab per existing initial-focus behavior.
+  const urlTab = screen.getByRole("tab", { name: /url/i });
+  expect(document.activeElement).toBe(urlTab);
+  const dialog = screen.getByRole("dialog");
+  const submitButton = within(dialog).getByRole("button", { name: /^add credential$/i });
+
+  await user.tab({ shift: true });
+  expect(document.activeElement).toBe(submitButton);
 });

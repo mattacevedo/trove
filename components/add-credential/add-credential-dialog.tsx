@@ -28,10 +28,61 @@ export function AddCredentialDialog({ onClose }: { onClose: () => void }) {
       ))?.focus();
   }, []);
 
-  // Escape to close.
+  // Escape to close, and Tab/Shift+Tab focus trapping so keyboard focus can't escape the modal
+  // into the page behind it (WCAG 2.1.2 / AA modal-dialog requirement).
   useEffect(() => {
+    function isVisible(el: HTMLElement): boolean {
+      // Note: deliberately not using `offsetParent` here — jsdom (our test environment) never
+      // computes layout, so `offsetParent` is always null there and would wrongly exclude every
+      // element. Checking `hidden` + inline display/visibility catches the cases this dialog
+      // actually produces (conditionally-rendered tab panels use JS `? :`, not CSS hiding), and
+      // works identically in jsdom and real browsers.
+      if (el.hidden) return false;
+      const style = el.style;
+      if (style.display === "none" || style.visibility === "hidden") return false;
+      return true;
+    }
+
+    function getFocusable(): HTMLElement[] {
+      const container = dialogRef.current;
+      if (!container) return [];
+      const nodes = container.querySelectorAll<HTMLElement>(
+        'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]'
+      );
+      // Exclude anything explicitly taken out of the natural Tab order (tabIndex === -1) — the
+      // tablist's inactive tabs use this roving-tabindex pattern intentionally.
+      return Array.from(nodes).filter((el) => el.tabIndex !== -1 && isVisible(el));
+    }
+
     function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") {
+        onClose();
+        return;
+      }
+      if (e.key !== "Tab") return;
+
+      const focusable = getFocusable();
+      if (focusable.length === 0) {
+        e.preventDefault();
+        return;
+      }
+
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement as HTMLElement | null;
+      const activeIndex = active ? focusable.indexOf(active) : -1;
+
+      if (e.shiftKey) {
+        if (activeIndex <= 0) {
+          e.preventDefault();
+          last.focus();
+        }
+      } else {
+        if (activeIndex === -1 || activeIndex === focusable.length - 1) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
     }
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
