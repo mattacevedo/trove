@@ -1,0 +1,3 @@
+O*NET-SOC Code	Title	Description
+15-1252.00	Software Developers	Develop applications software.
+29-1141.00	Registered Nurses	Assess patient health problems and needs.

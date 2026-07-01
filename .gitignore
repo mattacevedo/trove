@@ -4,3 +4,7 @@ node_modules/
 .DS_Store
 .next/
 .superpowers/
+
+# O*NET source data (large, external, redownloadable)
+scripts/onet-data/*.txt
+*.tsbuildinfo
