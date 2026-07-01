@@ -428,91 +428,115 @@ git commit -m "feat: design tokens, fonts, Button and VerificationBadge primitiv
 
 ---
 
-### Task 3: Hosted Supabase project link + extensions migration
+### Task 3: Migration tooling (Management API) + extensions migration
 
-> **No Docker.** This task links the CLI to a hosted Supabase free-tier project and applies
-> migrations remotely with `supabase db push`. The project must already exist and its
-> credentials must be present in `.env.local` (the human operator provides these — see the
-> "Human setup" note at the end of the plan). A subagent running this task should **stop and
-> report** if `.env.local` is missing the Supabase values or if `supabase link` has not been run.
+> **No Docker, no CLI link.** Migrations are applied to the hosted Supabase project by POSTing
+> the SQL to the **Management API** (`POST https://api.supabase.com/v1/projects/{ref}/database/query`)
+> using a personal access token. This needs no database password and no `supabase login`. The
+> operator has already populated `.env.local` with `SUPABASE_PROJECT_REF` and
+> `SUPABASE_ACCESS_TOKEN` (plus the URL + keys). A subagent running this task should **stop and
+> report** if `.env.local` is missing `SUPABASE_PROJECT_REF` or `SUPABASE_ACCESS_TOKEN`.
+>
+> Migration files live in `supabase/migrations/` as the git source of truth and are numbered
+> (`0001_…`, `0002_…`). Note: because we apply via the Management API (not `supabase db push`),
+> Supabase's own migration-history table is not populated — that is an accepted tradeoff for this
+> foundation; the files in git are authoritative. Each migration applies once to the fresh
+> project (the DDL is not written to be re-runnable).
 
 **Files:**
-- Create: `supabase/config.toml` (generated), `supabase/migrations/<ts>_extensions.sql`, `.env.local`, `.env.example`
-- Modify: `.gitignore` (ensure `.env*` ignored — already present)
+- Create: `scripts/apply-migration.mjs`, `supabase/migrations/0001_extensions.sql`, `.env.example`
+- (`.env.local` already exists, populated by the operator — do NOT overwrite it)
 
 **Interfaces:**
-- Consumes: a hosted Supabase project (URL + anon key + service_role key + project ref + db password), provided by the human operator
-- Produces: a linked, migrated hosted Postgres with `pgcrypto` + `citext` enabled; `.env.local` with `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `NEXT_PUBLIC_SITE_URL`
+- Consumes: `SUPABASE_PROJECT_REF`, `SUPABASE_ACCESS_TOKEN` from `.env.local`
+- Produces:
+  - `scripts/apply-migration.mjs` — CLI: `node scripts/apply-migration.mjs <path-to-sql>` — reads the SQL file, POSTs it to the Management API, exits non-zero on any error
+  - a hosted Postgres with `pgcrypto` + `citext` enabled
 
-- [ ] **Step 1: Install the Supabase CLI and init**
-
-```bash
-npm install -D supabase
-npx supabase init
-```
-
-Expected: creates `supabase/config.toml` and `supabase/` folder. Accept defaults; if asked about VS Code settings, choose no. (This does NOT start Docker.)
-
-- [ ] **Step 2: Log in and link to the hosted project**
+- [ ] **Step 1: Install dotenv (used by the apply script and later tests)**
 
 ```bash
-npx supabase login            # opens a browser to authorize the CLI
-npx supabase link --project-ref <PROJECT_REF>   # ref is in the project's dashboard URL
+npm install -D dotenv
 ```
 
-Expected: "Finished supabase link." The CLI will prompt for the database password (set when the project was created). `<PROJECT_REF>` is the 20-char id in `https://supabase.com/dashboard/project/<PROJECT_REF>`.
+- [ ] **Step 2: Confirm required env vars are present**
 
-- [ ] **Step 3: Confirm `.env.local` and write `.env.example`**
+Run: `node -e "require('dotenv').config({path:'.env.local'}); console.log(!!process.env.SUPABASE_PROJECT_REF && !!process.env.SUPABASE_ACCESS_TOKEN)"`
+Expected: `true`. If `false`, STOP and report — the operator must populate `.env.local` first.
 
-`.env.local` (values from the project's dashboard → Project Settings → API; **provided by the human operator**, do not invent):
+- [ ] **Step 3: Write `scripts/apply-migration.mjs`**
 
+```js
+import { readFileSync } from "node:fs";
+import { config } from "dotenv";
+
+config({ path: ".env.local" });
+
+const ref = process.env.SUPABASE_PROJECT_REF;
+const token = process.env.SUPABASE_ACCESS_TOKEN;
+const file = process.argv[2];
+
+if (!ref || !token) {
+  console.error("Missing SUPABASE_PROJECT_REF or SUPABASE_ACCESS_TOKEN in .env.local");
+  process.exit(1);
+}
+if (!file) {
+  console.error("Usage: node scripts/apply-migration.mjs <path-to-sql>");
+  process.exit(1);
+}
+
+const query = readFileSync(file, "utf8");
+const res = await fetch(
+  `https://api.supabase.com/v1/projects/${ref}/database/query`,
+  {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ query }),
+  }
+);
+
+const text = await res.text();
+if (!res.ok) {
+  console.error(`FAILED (${res.status}) applying ${file}:\n${text}`);
+  process.exit(1);
+}
+console.log(`Applied ${file}. Response: ${text}`);
 ```
-NEXT_PUBLIC_SUPABASE_URL=https://<PROJECT_REF>.supabase.co
-NEXT_PUBLIC_SUPABASE_ANON_KEY=<anon public key>
-SUPABASE_SERVICE_ROLE_KEY=<service_role secret key>
-NEXT_PUBLIC_SITE_URL=http://localhost:3000
-```
 
-`.env.example` (committed, no secrets):
+- [ ] **Step 4: Write `.env.example` (committed, no secrets)**
 
 ```
 NEXT_PUBLIC_SUPABASE_URL=
 NEXT_PUBLIC_SUPABASE_ANON_KEY=
 SUPABASE_SERVICE_ROLE_KEY=
+SUPABASE_PROJECT_REF=
+SUPABASE_ACCESS_TOKEN=
 NEXT_PUBLIC_SITE_URL=http://localhost:3000
 POSTMARK_SERVER_TOKEN=
 ANTHROPIC_API_KEY=
 STRIPE_SECRET_KEY=
 ```
 
-Verify the values load: `node -e "require('dotenv').config({path:'.env.local'}); console.log(!!process.env.SUPABASE_SERVICE_ROLE_KEY)"` → expected `true`.
-
-- [ ] **Step 4: Create the extensions migration**
-
-```bash
-npx supabase migration new extensions
-```
-
-Open the created `supabase/migrations/<ts>_extensions.sql` and write:
+- [ ] **Step 5: Create the extensions migration `supabase/migrations/0001_extensions.sql`**
 
 ```sql
 create extension if not exists pgcrypto;   -- gen_random_uuid()
 create extension if not exists citext;     -- case-insensitive handle/email
 ```
 
-- [ ] **Step 5: Push the migration to the hosted project and verify**
+- [ ] **Step 6: Apply it via the Management API**
+
+Run: `node scripts/apply-migration.mjs supabase/migrations/0001_extensions.sql`
+Expected: `Applied supabase/migrations/0001_extensions.sql. Response: []` (empty result array = success, no error).
+
+- [ ] **Step 7: Commit (script + migration + .env.example; `.env.local` stays ignored)**
 
 ```bash
-npx supabase db push
-```
-
-Expected: applies the extensions migration to the linked remote and prints "Finished supabase db push." (`db push` applies only pending migrations; safe to re-run.)
-
-- [ ] **Step 6: Commit (migrations + config only; `.env.local` stays ignored)**
-
-```bash
-git add supabase/ .env.example package.json package-lock.json
-git commit -m "chore: link hosted supabase project and add extensions migration"
+git add scripts/apply-migration.mjs supabase/migrations/0001_extensions.sql .env.example package.json package-lock.json
+git commit -m "chore: management-API migration tooling and extensions migration"
 ```
 
 ---
@@ -520,21 +544,17 @@ git commit -m "chore: link hosted supabase project and add extensions migration"
 ### Task 4: Core schema migration (all tables)
 
 **Files:**
-- Create: `supabase/migrations/<ts>_core_schema.sql`
+- Create: `supabase/migrations/0002_core_schema.sql`
 - Test: `tests/db/schema.test.ts`
 - Create (test helper): `tests/db/admin-client.ts`
 
 **Interfaces:**
-- Consumes: extensions from Task 3
-- Produces: tables `earners`, `credentials`, `skills`, `credential_skills`, `earner_skills`, `sponsors`, `cohort_members`, `advisor_threads`, `advisor_messages` with the columns named in the spec §4. Enums: `verification_status` (`verified`/`unverified`/`failed`), `credential_source` (`ob_url`/`ob_file`/`manual`), `cohort_status` (`invited`/`active`/`removed`).
+- Consumes: extensions from Task 3; `scripts/apply-migration.mjs` from Task 3
+- Produces: tables `earners`, `credentials`, `skills`, `credential_skills`, `earner_skills`, `sponsors`, `sponsor_admins`, `cohort_members`, `advisor_threads`, `advisor_messages` with the columns named in the spec §4. Enums: `verification_status` (`verified`/`unverified`/`failed`), `credential_source` (`ob_url`/`ob_file`/`manual`), `cohort_status` (`invited`/`active`/`removed`), `skill_type` (`skill`/`competency`/`occupation`).
 
-- [ ] **Step 1: Create the schema migration file**
+- [ ] **Step 1: Create the schema migration file `supabase/migrations/0002_core_schema.sql`**
 
-```bash
-npx supabase migration new core_schema
-```
-
-Write into `supabase/migrations/<ts>_core_schema.sql`:
+Write into `supabase/migrations/0002_core_schema.sql`:
 
 ```sql
 -- Enums
@@ -642,10 +662,10 @@ create table advisor_messages (
 create index advisor_messages_thread_idx on advisor_messages (thread_id);
 ```
 
-- [ ] **Step 2: Push the migration to the hosted project**
+- [ ] **Step 2: Apply the migration via the Management API**
 
-Run: `npx supabase db push`
-Expected: the core_schema migration applies to the linked remote, "Finished supabase db push".
+Run: `node scripts/apply-migration.mjs supabase/migrations/0002_core_schema.sql`
+Expected: `Applied … Response: []` (success). If it errors, read the message, fix the SQL, and re-run against a fresh state — note the DDL is not re-runnable, so a partial failure may require dropping the created objects first.
 
 - [ ] **Step 3: Write the test admin client helper `tests/db/admin-client.ts`**
 
@@ -733,21 +753,17 @@ git commit -m "feat: core database schema with earners, credentials, skills, spo
 ### Task 5: Row-level security policies
 
 **Files:**
-- Create: `supabase/migrations/<ts>_rls_policies.sql`
+- Create: `supabase/migrations/0003_rls_policies.sql`
 - Test: `tests/db/rls.test.ts`
 - Create (test helper): `tests/db/user-client.ts`
 
 **Interfaces:**
-- Consumes: schema from Task 4
+- Consumes: schema from Task 4; `scripts/apply-migration.mjs` from Task 3
 - Produces: RLS enabled on all app tables. Policies enforce: an earner reads/writes only their own `earners`, `credentials`, `credential_skills`, `earner_skills`, `advisor_threads`, `advisor_messages`; a sponsor admin reads `cohort_members` for their sponsor and reads consented earner data; `skills` is world-readable.
 
-- [ ] **Step 1: Create the RLS migration**
+- [ ] **Step 1: Create the RLS migration `supabase/migrations/0003_rls_policies.sql`**
 
-```bash
-npx supabase migration new rls_policies
-```
-
-Write into `supabase/migrations/<ts>_rls_policies.sql`:
+Write into `supabase/migrations/0003_rls_policies.sql`:
 
 ```sql
 -- Enable RLS everywhere.
@@ -838,10 +854,10 @@ create policy earner_skills_sponsor_select on earner_skills
   );
 ```
 
-- [ ] **Step 2: Push the migration to the hosted project**
+- [ ] **Step 2: Apply the migration via the Management API**
 
-Run: `npx supabase db push`
-Expected: the rls_policies migration applies to the linked remote, "Finished supabase db push".
+Run: `node scripts/apply-migration.mjs supabase/migrations/0003_rls_policies.sql`
+Expected: `Applied … Response: []` (success).
 
 - [ ] **Step 3: Write the test user-client helper `tests/db/user-client.ts`**
 
@@ -1317,25 +1333,21 @@ git commit -m "feat: passwordless OTP auth, earner provisioning, protected app s
 
 **Type consistency:** `createServerClient()` (async) used consistently in server.ts, actions.ts, confirm/route.ts, app/layout.tsx; `provisionEarner(db, userId, email)` signature matches its test; table/column names match between Task 4 schema, Task 5 policies, and Task 6 inserts (`earners.handle`, `credentials.earner_id`, `cohort_members.consent_share_skills`). ✅
 
-**Known environmental dependency:** Tasks 3–6 use a **hosted Supabase project** (no Docker). Tasks 4–6 DB tests require the project linked (`supabase link`) and `.env.local` populated with its URL + keys. Migrations are applied with `supabase db push`. This is stated in each relevant task.
+**Known environmental dependency:** Tasks 3–6 use a **hosted Supabase project** (no Docker, no CLI link). Migrations are applied by POSTing SQL to the **Management API** via `scripts/apply-migration.mjs` (needs `SUPABASE_PROJECT_REF` + `SUPABASE_ACCESS_TOKEN` in `.env.local`). Tasks 4–6 DB tests require the project reachable and `.env.local` populated with URL + anon + service_role keys. This is stated in each relevant task. **Status: `.env.local` is already populated and the Management API is verified working (controller confirmed `select` succeeds against the project).**
 
 ---
 
-## Human Setup (hosted Supabase — required before Task 3)
+## Human Setup (hosted Supabase) — COMPLETE
 
-The operator (not a subagent) must do this once, because it needs a browser login and secret keys:
+Done by the operator; recorded here for reproducibility. `.env.local` (git-ignored) contains:
 
-1. Go to https://supabase.com → sign in → **New project**. Name it `trove` (or similar), pick a
-   region near you, and **save the database password** it makes you set.
-2. Wait for provisioning (~2 min). Then open **Project Settings → API** and copy:
-   - **Project URL** → `NEXT_PUBLIC_SUPABASE_URL`
-   - **anon public** key → `NEXT_PUBLIC_SUPABASE_ANON_KEY`
-   - **service_role** key (secret) → `SUPABASE_SERVICE_ROLE_KEY`
-3. The **project ref** is the id in the dashboard URL (`.../project/<REF>`), used by `supabase link`.
-4. Paste the three values into `.env.local` (Task 3 Step 3). Keep the service_role key secret —
-   it bypasses RLS and must never reach the browser or git.
+- `NEXT_PUBLIC_SUPABASE_URL` — the project URL (`https://<ref>.supabase.co`)
+- `NEXT_PUBLIC_SUPABASE_ANON_KEY` — the publishable/anon key (`sb_publishable_…`)
+- `SUPABASE_SERVICE_ROLE_KEY` — the secret/service_role key (`sb_secret_…`) — bypasses RLS, never commit
+- `SUPABASE_PROJECT_REF` — the project ref (`kuhhupacabevjrfeigaj`)
+- `SUPABASE_ACCESS_TOKEN` — a personal access token (`sbp_…`) from supabase.com → Account → Access Tokens; used only for the Management API migration calls. No database password is needed.
 
-Tasks 1–2 (frontend) do not need any of this and can proceed in parallel.
+Tasks 1–2 (frontend) needed none of this and were completed in parallel.
 
 ## Next Plans (written when this one is executed and its realities are known)
 
