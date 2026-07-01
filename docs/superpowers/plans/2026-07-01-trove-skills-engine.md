@@ -4,9 +4,9 @@
 
 **Goal:** Build the Trove skills engine (`lib/skills/`) — the spine of the product: a credential goes in, an O\*NET-normalized skills profile comes out. Seed a focused O\*NET vocabulary into the `skills` table, extract candidate skills from OB 2.x / OB 3.0 / CLR / VC structured data (with an injectable Claude Sonnet 4.6 fallback for text-only credentials), normalize those raw strings to the seeded canonical vocabulary deterministically, and roll the per-credential matches up into `earner_skills`. Every step is either a pure, hermetic unit-tested function or a thin dependency-injected shell so no unit test ever touches the network or a paid LLM.
 
-**Architecture:** A strict **pure-core / impure-shell** module split under `lib/skills/`, mirroring Plan 1's conventions exactly (DI'd `SupabaseClient` first argument like `provisionEarner`, `@/` import alias, Vitest, `tests/db/*` helpers for hosted-DB integration tests, migrations numbered `0004+` and applied via `scripts/apply-migration.mjs` against the Management API). The engine has three pure transforms (`extract` → `normalize` → `rollup`), two impure adapters (`data.ts` = the only Supabase writer, `llm.ts` = the only Anthropic caller), and one impure orchestrator (`index.ts` → `processCredential`) that Plan 3's import flow calls. The canonical vocabulary is loaded once by a one-off Node seed script (`scripts/seed-onet.mjs`) plus a small extensions migration (`0004_pg_trgm.sql`). NOTE: the v1 fuzzy tier is **in-process** (`trigramSimilarity` over the vocabulary array); `0004_pg_trgm.sql` provisions `pg_trgm` + a GIN index as forward-looking infrastructure for a future DB-backed fallback but is **not queried by any code or test in Plan 2**.
+**Architecture:** A strict **pure-core / impure-shell** module split under `lib/skills/`, mirroring Plan 1's conventions exactly (DI'd `SupabaseClient` first argument like `provisionEarner`, `@/` import alias, Vitest, `tests/db/*` helpers for hosted-DB integration tests; Plan 2 adds no new migrations — it seeds data into the existing schema via a Node script). The engine has three pure transforms (`extract` → `normalize` → `rollup`), two impure adapters (`data.ts` = the only Supabase writer, `llm.ts` = the only Anthropic caller), and one impure orchestrator (`index.ts` → `processCredential`) that Plan 3's import flow calls. The canonical vocabulary is loaded once by a one-off Node seed script (`scripts/seed-onet.mjs`). NOTE: the v1 fuzzy tier is **in-process** (`trigramSimilarity` over the vocabulary array).
 
-**Tech Stack:** TypeScript, `@supabase/supabase-js` (already installed), `@anthropic-ai/sdk` (new, added in this plan; wraps `claude-sonnet-4-6`), Postgres `pg_trgm` for fuzzy normalization at scale, Vitest for unit + hosted-DB integration tests. No new frontend deps — the skills engine is server-side only.
+**Tech Stack:** TypeScript, `@supabase/supabase-js` (already installed), `@anthropic-ai/sdk` (new, added in this plan; wraps `claude-sonnet-4-6`), Vitest for unit + hosted-DB integration tests. No new frontend deps — the skills engine is server-side only.
 
 ## Global Constraints
 
@@ -16,7 +16,7 @@ Every task's requirements implicitly include these (binding, from the spec and P
 - **Stack (do not substitute):** Next.js + Supabase (Postgres/RLS/Auth/Storage) + Vercel + Stripe + Postmark + **Claude Sonnet 4.6**. Model id for all AI work: `claude-sonnet-4-6`. Opus only if a specific later task needs it (none here).
 - **AI is server-side only.** All Claude calls live behind `lib/skills/llm.ts`; the API key (`ANTHROPIC_API_KEY`, already present-but-unset in `.env.example`) never reaches the client. No `NEXT_PUBLIC_` exposure of any key.
 - **Cost-conscious ("not rich"):** structured-first — the LLM is never called when a credential carries structured skill data; when it is called it sends only `title` + `description` (never `raw_json`), a single non-streaming request with small `max_tokens`, one call per credential (not per skill, not per profile view), and results are content-hash cached so duplicate imports never re-call the model. Normalization resolves the large majority of strings for free (exact/alias/trigram) before any LLM tie-break is even considered.
-- **Migrations:** applied to the hosted Supabase project by POSTing SQL to the **Management API** via `node scripts/apply-migration.mjs <file>` (NOT `supabase db push`). Numbered sequentially after `0003_rls_policies.sql` → this plan adds `0004_pg_trgm.sql`. DDL is not written to be re-runnable (Supabase's migration-history table is not populated — files in git are authoritative), but this migration uses `create extension if not exists` / `create index if not exists` so it is safely idempotent.
+- **Migrations:** applied to the hosted Supabase project by POSTing SQL to the **Management API** via `node scripts/apply-migration.mjs <file>` (NOT `supabase db push`), numbered sequentially after `0003_rls_policies.sql`. This plan adds no new migrations — the O\*NET vocabulary is seeded into the existing `skills` table (from `0002_core_schema.sql`) via `scripts/seed-onet.mjs`, and normalization runs in-process (no schema changes required).
 - **No secrets in git.** `.env.local` is git-ignored and already populated (`SUPABASE_PROJECT_REF`, `SUPABASE_ACCESS_TOKEN`, URL, anon key, service-role key). O\*NET source `.txt` files are treated as external gitignored input; only the seed script + a README note of the release version are committed.
 - **Mirror Plan 1 test patterns:** colocated `*.test.ts` beside pure source (zero network); hosted-DB integration tests under `tests/db/` use `adminClient()` from `tests/db/admin-client.ts` (service-role, bypasses RLS) and clean up with `admin.auth.admin.deleteUser(id)` in `afterAll` (FK `on delete cascade` chains from `0002_core_schema.sql` remove dependent rows). The only tests permitted to reach a live service hit Supabase; no test ever calls the real Anthropic API — the LLM path is always exercised through an injected fake.
 - **Ownership/RLS:** the earner owns the wallet. `recomputeEarnerSkills` writes only the target earner's rows; it works under either the service-role client or the earner's own session client (Plan 1's `earner_skills_owner_all` / `credential_skills_owner_all` policies already permit an earner's own rows).
@@ -37,7 +37,6 @@ Files created/modified in this plan and their single responsibility:
 - `lib/skills/data.ts` — CREATE: the ONLY impure module touching Supabase; DI'd `db` first arg; owns reads/writes of `skills`, `credential_skills`, `earner_skills`, including `recomputeEarnerSkills`
 - `lib/skills/llm.ts` — CREATE: the ONLY impure module touching the Anthropic SDK; `createAnthropicLlmClient()` wraps `claude-sonnet-4-6`; in-memory content-hash cache
 - `lib/skills/index.ts` — CREATE: the single impure orchestrator `processCredential(db, llm, credentialId)`; wires extract → normalize → data writes → rollup
-- `supabase/migrations/0004_pg_trgm.sql` — CREATE: enable `pg_trgm` + GIN trigram index on `skills.canonical_name`. NOTE: this is **speculative infrastructure** — no code or test in this plan queries Postgres via `pg_trgm`/`%`; the v1 trigram tier runs in-process (`trigramSimilarity` over the small vocabulary loaded by `getSkillVocabulary`). The extension/index are provisioned now so a future DB-backed fuzzy fallback (for when the vocabulary outgrows an in-process scan) needs no migration; it is not wired up in Plan 2.
 - `scripts/seed-onet.mjs` — CREATE: one-off Node script; parses three O\*NET `.txt` files, upserts the v1 vocabulary subset into `skills`; idempotent via `onConflict`
 - `scripts/onet-data/README.md` — CREATE: records the O\*NET release version/date and the download URL; the `.txt` files themselves are gitignored
 - `.gitignore` — MODIFIED: ignore `scripts/onet-data/*.txt`
@@ -216,7 +215,7 @@ git commit -m "feat: skills-engine shared types and Anthropic SDK dependency"
 
 ---
 
-### Task 2: O\*NET parsers (pure) + seed script + pg_trgm migration
+### Task 2: O\*NET parsers (pure) + seed script
 
 > **Source data.** Download the O\*NET Database "Text Files" ZIP from
 > https://www.onetcenter.org/database.html#individual-files (release 29.3 or the current
@@ -242,7 +241,7 @@ git commit -m "feat: skills-engine shared types and Anthropic SDK dependency"
 > if it does not.
 
 **Files:**
-- Create: `lib/skills/onet-parse.ts`, `lib/skills/onet-parse.test.ts`, `tests/fixtures/onet-sample.txt`, `scripts/seed-onet.mjs`, `scripts/onet-data/README.md`, `supabase/migrations/0004_pg_trgm.sql`
+- Create: `lib/skills/onet-parse.ts`, `lib/skills/onet-parse.test.ts`, `tests/fixtures/onet-sample.txt`, `scripts/seed-onet.mjs`, `scripts/onet-data/README.md`
 - Modify: `.gitignore`, `package.json` (add `engines.node`), `.nvmrc` (create)
 
 **Interfaces:**
@@ -260,7 +259,7 @@ git commit -m "feat: skills-engine shared types and Anthropic SDK dependency"
   export function parseTechnologySkills(text: string, allowlist: Set<string>): SeedRow[];
   export const V1_OCCUPATION_PREFIXES: readonly string[]; // SOC major-group prefixes for the v1 subset
   ```
-  Plus: `scripts/seed-onet.mjs` (CLI: `node scripts/seed-onet.mjs`) upserting ~300–400 rows into `skills`; a hosted Postgres with `pg_trgm` enabled and a GIN trigram index on `skills.canonical_name`.
+  Plus: `scripts/seed-onet.mjs` (CLI: `node scripts/seed-onet.mjs`) upserting ~300–400 rows into `skills`.
 
 - [ ] **Step 0: Pin the Node runtime (prerequisite for the `.mjs` → `.ts` import)**
 
@@ -589,37 +588,18 @@ for (let i = 0; i < rows.length; i += BATCH) {
 console.log(`Seeded ${rows.length} rows into skills (idempotent — safe to re-run).`);
 ```
 
-- [ ] **Step 9: Write `supabase/migrations/0004_pg_trgm.sql`**
-
-```sql
--- Provision Postgres trigram matching + a GIN index on the canonical vocabulary column
--- named in 0002_core_schema.sql. NOTE: this is forward-looking infrastructure only — no
--- code or test in Plan 2 queries pg_trgm / the `%` operator / this index. Plan 2's fuzzy
--- tier runs in-process (lib/skills/normalize.ts::trigramSimilarity). This migration exists
--- so a future DB-backed fuzzy fallback (when the vocabulary outgrows an in-process scan)
--- needs no schema change. Safe/idempotent via the `if not exists` guards.
-create extension if not exists pg_trgm;
-create index if not exists skills_canonical_name_trgm_idx
-  on skills using gin (canonical_name gin_trgm_ops);
-```
-
-- [ ] **Step 10: Apply the migration via the Management API**
-
-Run: `node scripts/apply-migration.mjs supabase/migrations/0004_pg_trgm.sql`
-Expected: `Applied … Response: []` (success). Re-running is safe (`if not exists` guards).
-
-- [ ] **Step 11: Run the seed script**
+- [ ] **Step 9: Run the seed script**
 
 Run: `node scripts/seed-onet.mjs`
 Expected: prints the prepared row counts and `Seeded … rows into skills`. **There is no fixed pass/fail row count** — the exact totals depend on the real O\*NET release and how many of the ~1000 occupations fall under the 9 chosen SOC major groups. As a rough shape: O\*NET's Skills taxonomy is a fixed ~35-element list, but the occupation and Hot-Technology counts for 9 major groups (which include large groups like Healthcare Practitioners/29 and Production/51) can easily run into the several-hundred-to-1000+ range. Treat any successful, error-free upsert that reports nonzero occupations, skills, AND competencies as success; do NOT flag a legitimately large count as a bug, and do NOT rubber-stamp a run that seeded suspiciously few rows (e.g. zero of any category). Re-running produces the same counts and no errors (idempotent upsert).
 
-- [ ] **Step 12: Commit (script + migration + parsers + fixtures; raw `.txt` files stay ignored)**
+- [ ] **Step 10: Commit (script + parsers + fixtures; raw `.txt` files stay ignored)**
 
 ```bash
 git add lib/skills/onet-parse.ts lib/skills/onet-parse.test.ts tests/fixtures/onet-sample.txt \
-  scripts/seed-onet.mjs scripts/onet-data/README.md supabase/migrations/0004_pg_trgm.sql \
+  scripts/seed-onet.mjs scripts/onet-data/README.md \
   .gitignore package.json .nvmrc
-git commit -m "feat: O*NET vocabulary seed (parsers, script, pg_trgm migration)"
+git commit -m "feat: O*NET vocabulary seed (parsers, script)"
 ```
 
 ---
@@ -2062,7 +2042,7 @@ git commit -m "feat: skills-engine orchestrator (processCredential) and seed-pre
 
 **Spec coverage (Plan 2 scope = design doc §4 skills engine + §9 subsystem 2, and the locked decisions passed to this plan):**
 - §4 step 1 **Extract** — structured OB2.x/OB3.0/CLR/VC + Claude Sonnet fallback → Task 3 (structured, pure) + Task 7 (LLM adapter, `claude-sonnet-4-6`) ✅
-- §4 step 2 **Normalize** — O\*NET-seeded canonical vocabulary + deterministic matcher → Task 2 (seed) + Task 4 (exact/alias/trigram, pure, **in-process**) ✅. `0004_pg_trgm.sql` is provisioned as forward-looking infrastructure for a future DB-backed fuzzy fallback and is **not queried by any Plan 2 code or test** (called out honestly in the File Structure, Architecture, and migration comment) — flagged, not silently implied to be wired up. ⚠️ speculative
+- §4 step 2 **Normalize** — O\*NET-seeded canonical vocabulary + deterministic matcher → Task 2 (seed) + Task 4 (exact/alias/trigram, pure, **in-process**) ✅. The v1 fuzzy tier runs entirely in-process (`trigramSimilarity` over the vocabulary array, loaded by `getSkillVocabulary`); no database-level fuzzy-matching infrastructure is provisioned or needed for Plan 2 (YAGNI — a DB-backed fallback can be added later if the vocabulary outgrows an in-process scan).
 - §4 step 3 **Roll up** — `earner_skills` recompute when credentials change → Task 5 (pure math) + Task 6 (`recomputeEarnerSkills`, app-service, idempotent, handles deletion) ✅
 - §10 O\*NET subset scope "tied to the first pilot sponsor's population" → Task 2 `V1_OCCUPATION_PREFIXES` (SOC groups 11/13/15/29/31/33/47/49/51), all ~35 O\*NET Skills, Hot-Tech competencies. ⚠️ **OPEN ASSUMPTION, not validated:** no pilot sponsor exists yet, so the prefix list is an explicit provisional placeholder with a `TODO(pilot-onboarding)` in code requiring product sign-off once the first sponsor's population is known. Row-count is release-dependent and deliberately NOT given a fixed pass/fail number (see Task 2 Step 11).
 - Locked decisions honored: O\*NET-seeded normalization (option a) ✅; `claude-sonnet-4-6` for LLM extraction ✅; server-side only (LLM behind `lib/skills/llm.ts`, no `NEXT_PUBLIC_` key) ✅; cost-conscious (structured-first short-circuit, title+description-only prompt, `max_tokens:300`, one call/credential, content-hash cache, free tiers resolve most strings) ✅
@@ -2079,4 +2059,4 @@ git commit -m "feat: skills-engine orchestrator (processCredential) and seed-pre
 - Table/column names match `0002_core_schema.sql` verbatim: `skills(id, canonical_name, type, onet_id)`, `credential_skills(credential_id, skill_id, confidence)`, `earner_skills(earner_id, skill_id, source_count, highest_confidence)`, `credentials(id, earner_id, title, raw_json, source)`. `skills.type` values (`skill`/`competency`/`occupation`) match the `skill_type` enum. ✅
 - `recomputeEarnerSkills` returns `{ skillCount }` consistently in `data.ts`, its test, and `processCredential`'s return. ✅
 
-**Known environmental dependencies:** Tasks 2, 6, 8's integration tests require the hosted Supabase project reachable and `.env.local` populated (URL + service-role key), plus the O\*NET seed having run (`node scripts/seed-onet.mjs`, which itself requires the three gitignored `.txt` files under `scripts/onet-data/`). `0004_pg_trgm.sql` is applied via the Management API exactly like Plan 1's migrations. No test requires `ANTHROPIC_API_KEY` — the real Anthropic call in `createAnthropicLlmClient` is never exercised in the suite (fakes injected everywhere), keeping CI at zero LLM spend.
+**Known environmental dependencies:** Tasks 2, 6, 8's integration tests require the hosted Supabase project reachable and `.env.local` populated (URL + service-role key), plus the O\*NET seed having run (`node scripts/seed-onet.mjs`, which itself requires the three gitignored `.txt` files under `scripts/onet-data/`). No test requires `ANTHROPIC_API_KEY` — the real Anthropic call in `createAnthropicLlmClient` is never exercised in the suite (fakes injected everywhere), keeping CI at zero LLM spend.
