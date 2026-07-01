@@ -7,3 +7,4 @@ node_modules/
 
 # O*NET source data (large, external, redownloadable)
 scripts/onet-data/*.txt
+*.tsbuildinfo
