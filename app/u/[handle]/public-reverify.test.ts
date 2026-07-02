@@ -22,7 +22,8 @@ vi.mock("@/lib/supabase/server", () => ({
 // vitest 4's vi.fn<T>() takes a single function-type argument (not <Args, Return>).
 const verifyCredential = vi.fn<() => Promise<VerifyResult>>();
 vi.mock("@/lib/credentials/verify", () => ({
-  verifyCredential: (...args: unknown[]) => (verifyCredential as any)(...args),
+  verifyCredential: (...args: unknown[]) =>
+    (verifyCredential as (...a: unknown[]) => Promise<VerifyResult>)(...args),
 }));
 
 afterEach(() => {

@@ -6,7 +6,9 @@ import type { VerifyResult } from "@/lib/credentials/types";
 const publicReverifyCredential = vi.fn<() => Promise<VerifyResult | null>>();
 vi.mock("@/app/u/[handle]/actions", () => ({
   publicReverifyCredential: (...args: unknown[]) =>
-    (publicReverifyCredential as any)(...args),
+    (publicReverifyCredential as (...a: unknown[]) => Promise<VerifyResult | null>)(
+      ...args,
+    ),
 }));
 
 import { PublicVerifyButton } from "./public-verify-button";
