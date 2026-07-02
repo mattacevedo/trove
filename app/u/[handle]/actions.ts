@@ -16,8 +16,28 @@ type DnsLookup = (
 const BLOCKED_HOSTS = new Set(["metadata.google.internal", "metadata"]);
 
 /**
+ * Canonical private/reserved-range block list, used by `isBlockedLiteralIp` below. `net.BlockList`
+ * operates on the address's numeric value, not its textual form, so it blocks an IPv4-mapped IPv6
+ * address (e.g. both the dotted `::ffff:169.254.169.254` AND the hex-compressed `::ffff:a9fe:a9fe`
+ * forms) the same way it blocks the bare IPv4 literal — no separate regex/parsing of the mapped form
+ * is needed. Verified empirically against Node's `net.BlockList` (see task report for the commands).
+ */
+const PRIVATE_BLOCK_LIST = new net.BlockList();
+PRIVATE_BLOCK_LIST.addSubnet("0.0.0.0", 8, "ipv4");
+PRIVATE_BLOCK_LIST.addSubnet("10.0.0.0", 8, "ipv4");
+PRIVATE_BLOCK_LIST.addSubnet("127.0.0.0", 8, "ipv4");
+PRIVATE_BLOCK_LIST.addSubnet("169.254.0.0", 16, "ipv4");
+PRIVATE_BLOCK_LIST.addSubnet("172.16.0.0", 12, "ipv4");
+PRIVATE_BLOCK_LIST.addSubnet("192.168.0.0", 16, "ipv4");
+PRIVATE_BLOCK_LIST.addSubnet("::1", 128, "ipv6");
+PRIVATE_BLOCK_LIST.addSubnet("fe80::", 10, "ipv6");
+PRIVATE_BLOCK_LIST.addSubnet("fc00::", 7, "ipv6");
+PRIVATE_BLOCK_LIST.addSubnet("::", 128, "ipv6");
+
+/**
  * Reject a host that is a LITERAL IP address in a loopback / private / link-local / ULA range,
- * including IPv4-mapped IPv6 forms. Returns true when the host must be blocked. Hostnames that are
+ * including IPv4-mapped IPv6 forms IN ANY TEXTUAL REPRESENTATION (dotted `::ffff:1.2.3.4` or
+ * hex-compressed `::ffff:0102:0304`). Returns true when the host must be blocked. Hostnames that are
  * NOT literal IPs are NOT resolved here (see the DNS-rebinding deferral below) — they pass this
  * check and are handled only by the metadata-hostname denylist above.
  */
@@ -26,28 +46,7 @@ function isBlockedLiteralIp(host: string): boolean {
   const h = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
   const fam = net.isIP(h);
   if (fam === 0) return false; // not a literal IP — a hostname
-
-  if (fam === 4) {
-    const [a, b] = h.split(".").map((n) => Number(n));
-    if (a === 127) return true;                    // 127.0.0.0/8 loopback
-    if (a === 10) return true;                     // 10.0.0.0/8
-    if (a === 192 && b === 168) return true;       // 192.168.0.0/16
-    if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
-    if (a === 169 && b === 254) return true;       // 169.254.0.0/16 link-local (incl. cloud metadata)
-    if (a === 0) return true;                       // 0.0.0.0/8
-    return false;
-  }
-
-  // IPv6
-  const lower = h.toLowerCase();
-  if (lower === "::1" || lower === "::") return true;               // loopback / unspecified
-  if (lower.startsWith("fe8") || lower.startsWith("fe9") ||
-      lower.startsWith("fea") || lower.startsWith("feb")) return true; // fe80::/10 link-local
-  if (lower.startsWith("fc") || lower.startsWith("fd")) return true;   // fc00::/7 unique-local
-  // IPv4-mapped IPv6 (e.g. ::ffff:169.254.169.254) — re-check the embedded v4 literal.
-  const mapped = lower.match(/::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-  if (mapped && isBlockedLiteralIp(mapped[1])) return true;
-  return false;
+  return PRIVATE_BLOCK_LIST.check(h, fam === 6 ? "ipv6" : "ipv4");
 }
 
 /**

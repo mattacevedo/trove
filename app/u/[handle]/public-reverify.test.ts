@@ -86,6 +86,49 @@ test("boundedFetch rejects literal private/loopback/link-local/metadata hosts be
   spy.mockRestore();
 });
 
+test("boundedFetch rejects IPv4-mapped IPv6 private addresses in EVERY textual form (dotted, hex-compressed, bare)", async () => {
+  const spy = vi.spyOn(globalThis, "fetch");
+  const { boundedFetch } = await import("./actions");
+  for (const url of [
+    "https://169.254.169.254/",        // bare IPv4
+    "https://[::ffff:169.254.169.254]/", // IPv4-mapped IPv6, dotted form
+    "https://[::ffff:a9fe:a9fe]/",       // IPv4-mapped IPv6, hex-compressed form (the specific gap)
+    "https://[::1]/",                    // IPv6 loopback
+    "https://[fe80::1]/",                // IPv6 link-local
+    "https://[fc00::1]/",                // IPv6 unique-local
+  ]) {
+    await expect(boundedFetch(url)).rejects.toThrow(/private|blocked|refus|internal|metadata/i);
+  }
+  expect(spy).not.toHaveBeenCalled();
+  spy.mockRestore();
+});
+
+test("isBlockedLiteralIp does not block a normal public IPv4 address", async () => {
+  const spy = vi
+    .spyOn(globalThis, "fetch")
+    .mockResolvedValue(new Response("{}", { status: 200 }));
+  const { makeBoundedFetch } = await import("./actions");
+  const boundedFetch = makeBoundedFetch({
+    lookup: async () => [{ address: "93.184.216.34", family: 4 }],
+  });
+  await boundedFetch("https://93.184.216.34/");
+  expect(spy).toHaveBeenCalledTimes(1);
+  spy.mockRestore();
+});
+
+test("boundedFetch rejects a hostname whose DNS resolution returns a hex-compressed IPv4-mapped IPv6 private address, before any fetch", async () => {
+  const spy = vi.spyOn(globalThis, "fetch");
+  const { makeBoundedFetch } = await import("./actions");
+  const boundedFetch = makeBoundedFetch({
+    lookup: async () => [{ address: "::ffff:a9fe:a9fe", family: 6 }],
+  });
+  await expect(boundedFetch("https://evil.example/verify")).rejects.toThrow(
+    /private|blocked|refus|internal|resolves/i
+  );
+  expect(spy).not.toHaveBeenCalled();
+  spy.mockRestore();
+});
+
 test("boundedFetch passes redirect:manual and an AbortSignal to the underlying fetch for a public https host", async () => {
   const spy = vi
     .spyOn(globalThis, "fetch")
