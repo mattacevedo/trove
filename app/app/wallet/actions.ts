@@ -3,6 +3,7 @@
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { createServerClient } from "@/lib/supabase/server";
+import { requireUserId } from "@/lib/auth/require-user";
 import { createAnthropicLlmClient } from "@/lib/skills/llm";
 import { createCredentialAndProcess } from "@/lib/credentials/create";
 import { verifyCredential } from "@/lib/credentials/verify";
@@ -39,15 +40,6 @@ function isHttpUrl(value: string): boolean {
   } catch {
     return false;
   }
-}
-
-async function requireUserId(): Promise<string> {
-  const supabase = await createServerClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-  if (!user) redirect("/login");
-  return user.id;
 }
 
 export async function importByUrl(formData: FormData): Promise<void> {
