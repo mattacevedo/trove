@@ -1,9 +1,16 @@
 "use server";
 
 import net from "node:net";
+import dns from "node:dns/promises";
 import { createServerClient } from "@/lib/supabase/server";
 import { verifyCredential } from "@/lib/credentials/verify";
 import type { VerifyResult, CredentialSource } from "@/lib/credentials/types";
+
+/** Matches the shape of `dns.promises.lookup(host, { all: true })` — injectable for hermetic tests. */
+type DnsLookup = (
+  host: string,
+  opts: { all: true }
+) => Promise<Array<{ address: string; family: number }>>;
 
 /** Known cloud-metadata hostnames that must never be fetched, even though they are not literal IPs. */
 const BLOCKED_HOSTS = new Set(["metadata.google.internal", "metadata"]);
@@ -51,34 +58,63 @@ function isBlockedLiteralIp(host: string): boolean {
  *   - literal-private-IP / metadata-host block: parse the host and reject loopback / RFC1918 /
  *     link-local / ULA literal IPs (v4, v6, IPv4-mapped) and known metadata hostnames. This closes
  *     the direct SSRF class (e.g. https://169.254.169.254/, https://[::1]/, https://10.0.0.1/).
+ *   - hostname->private-IP DNS-resolution block: when the host is NOT a literal IP, resolve it
+ *     (via the injectable `lookup`, defaulting to `dns.promises.lookup`) and reject if ANY resolved
+ *     address is a loopback/RFC1918/link-local/ULA literal (reusing `isBlockedLiteralIp`). A DNS
+ *     lookup failure is ALSO treated as a rejection (fail closed) rather than silently proceeding.
+ *     This closes the "stable-record" attack where an earner points a hosted-verify hostname at a
+ *     DNS record that resolves to an internal/metadata address.
  *   - redirect: "manual": a redirect cannot transparently pivot into an internal address.
  *   - 5s AbortSignal.timeout: bounds a single request's duration.
- * DEFERRED (documented, NOT silently skipped): a HOSTNAME that legitimately resolves via DNS to a
- * private IP (DNS-rebinding / attacker resolver) is still reachable — Node fetch does not expose the
- * resolved IP and this path adds no pre-resolve dns.lookup guard. Follow-up: dns.lookup + block
- * private results, or an egress allowlist/proxy. Per-IP / per-handle rate limiting also does NOT
- * exist yet (candidate follow-up: token bucket keyed by handle+credentialId).
+ * DEFERRED (documented, NOT silently skipped): the resolve-then-fetch sequence is still a TOCTOU /
+ * DNS-rebinding race — Node's fetch performs its own independent DNS resolution, so a resolver that
+ * answers safely for our pre-flight `lookup` and then rebinds to a private address for the actual
+ * connection is not caught here. A durable fix pins the resolved IP into the connection itself (e.g.
+ * a custom dispatcher/agent) or routes egress through an allowlisted proxy. Per-IP / per-handle rate
+ * limiting also does NOT exist yet (candidate follow-up: token bucket keyed by handle+credentialId).
  */
-export async function boundedFetch(
-  input: RequestInfo | URL,
-  init?: RequestInit
-): Promise<Response> {
-  const raw = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-  let parsed: URL;
-  try {
-    parsed = new URL(raw);
-  } catch {
-    throw new Error(`refusing unparseable verify fetch URL: ${raw}`);
-  }
-  if (parsed.protocol !== "https:") {
-    throw new Error(`refusing non-https verify fetch: ${raw}`);
-  }
-  const host = parsed.hostname; // no brackets for IPv6 in .hostname
-  if (BLOCKED_HOSTS.has(host.toLowerCase()) || isBlockedLiteralIp(host)) {
-    throw new Error(`refusing verify fetch to blocked/private host: ${host}`);
-  }
-  return fetch(raw, { ...init, redirect: "manual", signal: AbortSignal.timeout(5000) });
+export function makeBoundedFetch(
+  opts: { lookup: DnsLookup } = { lookup: dns.lookup as unknown as DnsLookup }
+): typeof fetch {
+  const { lookup } = opts;
+  return async function boundedFetch(
+    input: RequestInfo | URL,
+    init?: RequestInit
+  ): Promise<Response> {
+    const raw = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    let parsed: URL;
+    try {
+      parsed = new URL(raw);
+    } catch {
+      throw new Error(`refusing unparseable verify fetch URL: ${raw}`);
+    }
+    if (parsed.protocol !== "https:") {
+      throw new Error(`refusing non-https verify fetch: ${raw}`);
+    }
+    const host = parsed.hostname; // no brackets for IPv6 in .hostname
+    if (BLOCKED_HOSTS.has(host.toLowerCase()) || isBlockedLiteralIp(host)) {
+      throw new Error(`refusing verify fetch to blocked/private host: ${host}`);
+    }
+    // host is a hostname (not a literal IP, checked above) — resolve and vet every address.
+    let resolved: Array<{ address: string; family: number }>;
+    try {
+      resolved = await lookup(host, { all: true });
+    } catch (e) {
+      throw new Error(`refusing verify fetch: DNS resolution failed for ${host}: ${(e as Error).message}`);
+    }
+    for (const { address } of resolved) {
+      if (isBlockedLiteralIp(address)) {
+        throw new Error(
+          `refusing verify fetch to ${host}: resolves to blocked/private address ${address}`
+        );
+      }
+    }
+    return fetch(raw, { ...init, redirect: "manual", signal: AbortSignal.timeout(5000) });
+  };
 }
+
+/** Default production instance: real DNS via `dns.promises.lookup`. */
+export const boundedFetch = makeBoundedFetch();
 
 /**
  * READ-ONLY on-demand re-verify for anonymous public-profile viewers (spec §5). Re-loads raw_json
