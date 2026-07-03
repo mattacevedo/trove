@@ -22,7 +22,7 @@ export function computeOccupationGaps(
   const minOverlap = opts?.minOverlap ?? 1;
   const earnerSkillIds = new Set(earnerSkills.map((s) => s.skillId));
 
-  // occupationId -> { name, skillId -> skillName (from requirement rows) }
+  // occupationId -> { name, skillId -> canonical skillName (from requirement rows) }
   const byOccupation = new Map<
     string,
     { name: string; required: Map<string, string> }
@@ -33,16 +33,11 @@ export function computeOccupationGaps(
       entry = { name: req.occupationName, required: new Map() };
       byOccupation.set(req.occupationId, entry);
     }
-    entry.required.set(req.skillId, req.occupationName);
-    // Skill display name lives on the requirement row's own name lookup below; we key the
-    // missing-name list off a shared skill-name map assembled from requirements + earner rows.
-  }
-
-  // Build a skillId -> displayName map from both requirements (skillId) and earner rows.
-  const skillNameById = new Map<string, string>();
-  for (const s of earnerSkills) skillNameById.set(s.skillId, s.skillName);
-  for (const req of requirements) {
-    if (!skillNameById.has(req.skillId)) skillNameById.set(req.skillId, req.skillId);
+    // Store the SKILL's canonical name (resolved upstream in context.ts from the skills vocab).
+    // A MISSING skill is by definition not among the earner's held skills, so this requirement
+    // row is its only name source — storing the name here (not the UUID) keeps the
+    // "what to learn next" list human-readable.
+    entry.required.set(req.skillId, req.skillName);
   }
 
   const out: OccupationGap[] = [];
@@ -52,9 +47,9 @@ export function computeOccupationGaps(
 
     const haveSkillIds: string[] = [];
     const missingSkillNames: string[] = [];
-    for (const skillId of required.keys()) {
+    for (const [skillId, skillName] of required) {
       if (earnerSkillIds.has(skillId)) haveSkillIds.push(skillId);
-      else missingSkillNames.push(skillNameById.get(skillId) ?? skillId);
+      else missingSkillNames.push(skillName);
     }
     if (haveSkillIds.length < minOverlap) continue;
 

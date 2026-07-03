@@ -29,6 +29,10 @@ export interface OccupationSkillRequirement {
   occupationId: string;
   occupationName: string;
   skillId: string;
+  /** Canonical skill name, resolved from the skills vocabulary — NOT the raw UUID. The gap math
+   *  emits this into `missingSkillNames`, so it must be human-readable or the "what to learn next"
+   *  list shows UUIDs to the earner and the model. */
+  skillName: string;
   importance: number;
 }
 

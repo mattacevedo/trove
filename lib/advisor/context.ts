@@ -79,6 +79,9 @@ export async function loadAdvisorContext(
     occupationId: r.occupation_id as string,
     occupationName: skillNameById.get(r.occupation_id as string) ?? (r.occupation_id as string),
     skillId: r.skill_id as string,
+    // Resolve the skill's canonical name here (the vocab map has it) so the gap math emits real
+    // names, not UUIDs, into missingSkillNames. Fall back to the id only if the vocab lacks it.
+    skillName: skillNameById.get(r.skill_id as string) ?? (r.skill_id as string),
     importance: r.importance as number,
   }));
 

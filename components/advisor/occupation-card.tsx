@@ -27,8 +27,12 @@ export function OccupationCard({
         </ul>
       )}
       {reliesOnUnverified && (
-        <p className="mt-2 inline-flex items-center gap-1 text-xs text-[var(--color-unverified)]">
-          <span aria-hidden="true">⚠</span> Based partly on an unverified credential
+        // Safety-critical flag: keep the label on text-foreground for WCAG-AA 4.5:1 contrast
+        // (amber #d97706 at 12px is only ~3.2:1) and carry the amber cue on the ⚠ icon, which as
+        // a graphical object clears the 3:1 non-text threshold. Meaning never rides on color alone.
+        <p className="mt-2 inline-flex items-center gap-1 text-xs text-foreground">
+          <span aria-hidden="true" className="text-[var(--color-unverified)]">⚠</span> Based partly
+          on an unverified credential
         </p>
       )}
     </article>
