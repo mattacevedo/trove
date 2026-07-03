@@ -62,7 +62,7 @@ test("happy path returns the VerifyResult and never writes", async () => {
 
 test("boundedFetch throws synchronously on a non-https URL before any network call", async () => {
   const spy = vi.spyOn(globalThis, "fetch");
-  const { boundedFetch } = await import("./actions");
+  const { boundedFetch } = await import("./bounded-fetch");
   await expect(boundedFetch("http://internal/metadata")).rejects.toThrow(/https/i);
   expect(spy).not.toHaveBeenCalled();
   spy.mockRestore();
@@ -70,7 +70,7 @@ test("boundedFetch throws synchronously on a non-https URL before any network ca
 
 test("boundedFetch rejects literal private/loopback/link-local/metadata hosts before any network call", async () => {
   const spy = vi.spyOn(globalThis, "fetch");
-  const { boundedFetch } = await import("./actions");
+  const { boundedFetch } = await import("./bounded-fetch");
   for (const url of [
     "https://169.254.169.254/latest/meta-data/", // link-local / cloud metadata
     "https://[::1]/",                              // IPv6 loopback
@@ -88,7 +88,7 @@ test("boundedFetch rejects literal private/loopback/link-local/metadata hosts be
 
 test("boundedFetch rejects IPv4-mapped IPv6 private addresses in EVERY textual form (dotted, hex-compressed, bare)", async () => {
   const spy = vi.spyOn(globalThis, "fetch");
-  const { boundedFetch } = await import("./actions");
+  const { boundedFetch } = await import("./bounded-fetch");
   for (const url of [
     "https://169.254.169.254/",        // bare IPv4
     "https://[::ffff:169.254.169.254]/", // IPv4-mapped IPv6, dotted form
@@ -107,7 +107,7 @@ test("isBlockedLiteralIp does not block a normal public IPv4 address", async () 
   const spy = vi
     .spyOn(globalThis, "fetch")
     .mockResolvedValue(new Response("{}", { status: 200 }));
-  const { makeBoundedFetch } = await import("./actions");
+  const { makeBoundedFetch } = await import("./bounded-fetch");
   const boundedFetch = makeBoundedFetch({
     lookup: async () => [{ address: "93.184.216.34", family: 4 }],
   });
@@ -118,7 +118,7 @@ test("isBlockedLiteralIp does not block a normal public IPv4 address", async () 
 
 test("boundedFetch rejects a hostname whose DNS resolution returns a hex-compressed IPv4-mapped IPv6 private address, before any fetch", async () => {
   const spy = vi.spyOn(globalThis, "fetch");
-  const { makeBoundedFetch } = await import("./actions");
+  const { makeBoundedFetch } = await import("./bounded-fetch");
   const boundedFetch = makeBoundedFetch({
     lookup: async () => [{ address: "::ffff:a9fe:a9fe", family: 6 }],
   });
@@ -133,7 +133,7 @@ test("boundedFetch passes redirect:manual and an AbortSignal to the underlying f
   const spy = vi
     .spyOn(globalThis, "fetch")
     .mockResolvedValue(new Response("{}", { status: 200 }));
-  const { makeBoundedFetch } = await import("./actions");
+  const { makeBoundedFetch } = await import("./bounded-fetch");
   const boundedFetch = makeBoundedFetch({
     lookup: async () => [{ address: "93.184.216.34", family: 4 }],
   });
@@ -146,7 +146,7 @@ test("boundedFetch passes redirect:manual and an AbortSignal to the underlying f
 
 test("boundedFetch rejects a hostname that DNS-resolves to a private/link-local/loopback address, before any fetch", async () => {
   const spy = vi.spyOn(globalThis, "fetch");
-  const { makeBoundedFetch } = await import("./actions");
+  const { makeBoundedFetch } = await import("./bounded-fetch");
   for (const address of ["169.254.169.254", "10.0.0.1", "::1"]) {
     const boundedFetch = makeBoundedFetch({
       lookup: async () => [{ address, family: net_family(address) }],
@@ -163,7 +163,7 @@ test("boundedFetch proceeds to fetch when the hostname DNS-resolves to a public 
   const spy = vi
     .spyOn(globalThis, "fetch")
     .mockResolvedValue(new Response("{}", { status: 200 }));
-  const { makeBoundedFetch } = await import("./actions");
+  const { makeBoundedFetch } = await import("./bounded-fetch");
   const boundedFetch = makeBoundedFetch({
     lookup: async () => [{ address: "93.184.216.34", family: 4 }],
   });
@@ -174,7 +174,7 @@ test("boundedFetch proceeds to fetch when the hostname DNS-resolves to a public 
 
 test("boundedFetch fails closed (rejects, does not fetch) when DNS lookup itself throws", async () => {
   const spy = vi.spyOn(globalThis, "fetch");
-  const { makeBoundedFetch } = await import("./actions");
+  const { makeBoundedFetch } = await import("./bounded-fetch");
   const boundedFetch = makeBoundedFetch({
     lookup: async () => {
       throw new Error("ENOTFOUND");
@@ -188,7 +188,7 @@ test("boundedFetch fails closed (rejects, does not fetch) when DNS lookup itself
 test("boundedFetch (default export) still rejects literal private IPs without invoking the resolver", async () => {
   // Literal IPs must short-circuit on isBlockedLiteralIp and never reach the DNS lookup step.
   const spy = vi.spyOn(globalThis, "fetch");
-  const { boundedFetch } = await import("./actions");
+  const { boundedFetch } = await import("./bounded-fetch");
   await expect(boundedFetch("https://169.254.169.254/")).rejects.toThrow(/private|blocked|refus/i);
   expect(spy).not.toHaveBeenCalled();
   spy.mockRestore();

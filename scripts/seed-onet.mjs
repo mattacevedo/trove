@@ -19,6 +19,7 @@ import {
   parseOccupationData,
   parseSkillsElements,
   parseTechnologySkills,
+  parseOccupationSkillImportance,
   V1_OCCUPATION_PREFIXES,
 } from "../lib/skills/onet-parse.ts";
 
@@ -126,3 +127,73 @@ for (let i = 0; i < rows.length; i += BATCH) {
   }
 }
 console.log(`Seeded ${rows.length} rows into skills (idempotent — safe to re-run).`);
+
+// --- Plan 5: seed occupation_skills (occupation -> required-skill relation) ---
+// Must run AFTER skills are upserted: occupation_skills FKs skills.id. Re-select the seeded
+// vocabulary to build an onet_id -> id map, parse the occupation×skill importance rows, map through
+// the id lookup (dropping any skill element not in the seeded vocabulary), and batch-upsert.
+//
+// SOURCE FILES: the occupation×skill IM rows live either in the legacy unified `Skills.txt`
+// (pre-30.3) OR in the 30.3 split `Essential Skills.txt` + `Transferable Skills.txt`. Both share
+// the O*NET-SOC Code / Element ID / Scale ID / Data Value columns parseOccupationSkillImportance
+// reads, so we parse WHICHEVER files exist (mirroring the skills-vocabulary branch above). This
+// avoids silently producing an empty relation when a repo is seeded from the legacy file — the
+// same input shape the vocabulary path already supports.
+const occSkillSourcePaths = hasLegacySkills
+  ? [legacySkillsPath]
+  : [essentialSkillsPath, transferableSkillsPath];
+
+const { data: seededSkills, error: selErr } = await db
+  .from("skills")
+  .select("id, onet_id")
+  .not("onet_id", "is", null)
+  .range(0, 9999);
+if (selErr) {
+  console.error(`Re-select of seeded skills failed: ${selErr.message}`);
+  process.exit(1);
+}
+const idByOnetId = new Map(seededSkills.map((r) => [r.onet_id, r.id]));
+
+// Parse every source file and concatenate the parsed rows (never concatenate raw text — that would
+// duplicate header rows). Resolve O*NET ids -> skills.id; drop rows whose occupation or skill is
+// not in the vocabulary (e.g. an element pruned during the ~35-skill dedup, or a technology
+// 'competency' with a null onet_id). Collapse duplicate (occ, skill) pairs, keeping higher IM.
+const parsedRel = occSkillSourcePaths.flatMap((p) =>
+  parseOccupationSkillImportance(readFileSync(p, "utf8"), allowlist)
+);
+const relByKey = new Map();
+for (const row of parsedRel) {
+  const occId = idByOnetId.get(row.occupation_onet_id);
+  const skillId = idByOnetId.get(row.skill_onet_id);
+  if (!occId || !skillId) continue;
+  const key = `${occId}::${skillId}`;
+  const prev = relByKey.get(key);
+  if (!prev || row.importance > prev.importance) {
+    relByKey.set(key, { occupation_id: occId, skill_id: skillId, importance: row.importance });
+  }
+}
+const relRows = Array.from(relByKey.values());
+console.log(
+  `Prepared ${relRows.length} occupation_skills rows from ${occSkillSourcePaths.length} source ` +
+    `file(s): ${occSkillSourcePaths.join(", ")}.`
+);
+if (relRows.length < 1000) {
+  console.error(
+    `occupation_skills row count (${relRows.length}) is suspiciously low — expected >= ~1000. ` +
+      "A broken onet_id join or importance filter would produce this. Stop and debug before " +
+      "relying on the gap math; do NOT proceed to later tasks with a near-empty relation."
+  );
+  process.exit(1);
+}
+
+for (let i = 0; i < relRows.length; i += BATCH) {
+  const batch = relRows.slice(i, i + BATCH);
+  const { error } = await db
+    .from("occupation_skills")
+    .upsert(batch, { onConflict: "occupation_id,skill_id", ignoreDuplicates: false });
+  if (error) {
+    console.error(`occupation_skills batch ${i}-${i + batch.length} failed: ${error.message}`);
+    process.exit(1);
+  }
+}
+console.log(`Seeded ${relRows.length} rows into occupation_skills (idempotent — safe to re-run).`);
