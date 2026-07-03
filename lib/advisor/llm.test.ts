@@ -2,7 +2,7 @@ import { expect, test, vi } from "vitest";
 import { createAnthropicAdvisorLlmClient, ADVISOR_MODEL, ADVISOR_MAX_TOKENS } from "./llm";
 import type { AnthropicLike } from "./llm";
 
-function fakeClient(overrides?: Partial<ReturnType<typeof makeResponse>>) {
+function fakeClient(overrides?: Record<string, unknown>) {
   const create = vi.fn().mockResolvedValue(makeResponse(overrides));
   const client: AnthropicLike = { messages: { create } };
   return { client, create };
@@ -61,4 +61,65 @@ test("maps usage to tokenCost and extracts text content", async () => {
   expect(out.content).toBe("Here is some guidance.");
   expect(out.tokenCost).toBe(140);
   expect(out.usedWebSearch).toBe(false);
+});
+
+test("handles a tool-only / empty-text response without crashing", async () => {
+  // The model can return a response with no assistant `text` block — e.g. only a server_tool_use
+  // block (or an empty content array). The adapter filters for `text` blocks and joins them, so it
+  // must yield content "" (not throw) and still produce a well-formed { content, tokenCost,
+  // usedWebSearch }. Missing usage must degrade to tokenCost 0 via the `?? 0` guards.
+  const { client } = fakeClient({
+    content: [{ type: "server_tool_use", id: "srvtool_1", name: "web_search", input: {} }],
+    usage: undefined,
+  });
+  const llm = createAnthropicAdvisorLlmClient({ client });
+  const out = await llm.reply({
+    systemPrompt: "SYS",
+    contextBlock: "CTX",
+    history: [],
+    userMessage: "any openings today?",
+    webSearchEnabled: true,
+  });
+  expect(out.content).toBe(""); // no text block -> empty string, not a throw
+  expect(out.tokenCost).toBe(0); // absent usage -> 0
+  expect(typeof out.usedWebSearch).toBe("boolean");
+
+  // A fully empty content array is likewise tolerated.
+  const { client: emptyClient } = fakeClient({ content: [], usage: { input_tokens: 5 } });
+  const emptyLlm = createAnthropicAdvisorLlmClient({ client: emptyClient });
+  const emptyOut = await emptyLlm.reply({
+    systemPrompt: "SYS",
+    contextBlock: "CTX",
+    history: [],
+    userMessage: "hello",
+    webSearchEnabled: false,
+  });
+  expect(emptyOut.content).toBe("");
+  expect(emptyOut.tokenCost).toBe(5);
+  expect(emptyOut.usedWebSearch).toBe(false);
+});
+
+test("detects usedWebSearch: true from a web_search_tool_result block", async () => {
+  // The adapter keys usedWebSearch off the presence of a web_search_tool_result or server_tool_use
+  // block in the response content (lib/advisor/llm.ts). A response carrying that block — alongside
+  // the model's final text — must set usedWebSearch true while still extracting the text and cost.
+  const { client } = fakeClient({
+    content: [
+      { type: "server_tool_use", id: "srvtool_1", name: "web_search", input: { query: "jobs" } },
+      { type: "web_search_tool_result", tool_use_id: "srvtool_1", content: [] },
+      { type: "text", text: "Here are some current openings." },
+    ],
+    usage: { input_tokens: 200, output_tokens: 60 },
+  });
+  const llm = createAnthropicAdvisorLlmClient({ client });
+  const out = await llm.reply({
+    systemPrompt: "SYS",
+    contextBlock: "CTX",
+    history: [],
+    userMessage: "any openings today?",
+    webSearchEnabled: true,
+  });
+  expect(out.usedWebSearch).toBe(true);
+  expect(out.content).toBe("Here are some current openings.");
+  expect(out.tokenCost).toBe(260);
 });
