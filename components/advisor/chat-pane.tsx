@@ -53,7 +53,13 @@ export function ChatPane({
 
       {bubbles.length === 0 && <StarterPrompts onPick={submit} />}
 
-      <div className="flex flex-col gap-2" aria-label="Conversation">
+      <div
+        className="flex flex-col gap-2"
+        role="log"
+        aria-live="polite"
+        aria-relevant="additions"
+        aria-label="Conversation"
+      >
         {bubbles.map((m, i) => (
           <MessageBubble key={i} role={m.role} content={m.content} />
         ))}

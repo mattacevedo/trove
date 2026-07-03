@@ -27,7 +27,10 @@ export default async function AdvisorThreadPage({
             Target: {loaded.thread.targetOccupationName}
           </p>
         )}
-        <ChatPane threadId={threadId} initialMessages={loaded.messages} />
+        {/* key={threadId} forces a remount on thread switch so ChatPane's
+            useState initializers re-seed from the new thread's messages
+            (same [threadId] route → React would otherwise reuse the instance). */}
+        <ChatPane key={threadId} threadId={threadId} initialMessages={loaded.messages} />
       </main>
     </div>
   );
