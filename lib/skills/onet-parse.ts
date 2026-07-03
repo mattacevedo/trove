@@ -103,3 +103,43 @@ export function parseTechnologySkills(
   }
   return out;
 }
+
+/**
+ * O*NET 1–5 IM ("Importance") scale cutoff. O*NET's own "somewhat important or more"
+ * convention. Filtering at seed time keeps occupation_skills small and the runtime query
+ * trivial (no threshold logic duplicated in app code).
+ */
+export const MIN_IMPORTANCE = 3.0;
+
+export interface OccupationSkillRow {
+  occupation_onet_id: string;
+  skill_onet_id: string;
+  importance: number;
+}
+
+/**
+ * Parse an O*NET "Essential Skills" / "Transferable Skills" table into occupation×skill
+ * importance rows, restricted to the IM scale, to importance >= MIN_IMPORTANCE, and to
+ * occupations in the allowlist. Pure (no I/O) — the seed script resolves O*NET ids to
+ * skills.id and upserts. Call once per file's raw text and concat the results.
+ */
+export function parseOccupationSkillImportance(
+  text: string,
+  allowlist: Set<string>
+): OccupationSkillRow[] {
+  const out: OccupationSkillRow[] = [];
+  for (const row of parseTable(text)) {
+    const occCode = row["O*NET-SOC Code"];
+    const elementId = row["Element ID"];
+    const scale = row["Scale ID"];
+    if (!occCode || !elementId || scale !== "IM" || !allowlist.has(occCode)) continue;
+    const importance = Number(row["Data Value"]);
+    if (!Number.isFinite(importance) || importance < MIN_IMPORTANCE) continue;
+    out.push({
+      occupation_onet_id: occCode,
+      skill_onet_id: elementId,
+      importance,
+    });
+  }
+  return out;
+}
