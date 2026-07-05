@@ -1,6 +1,32 @@
 import { expect, test, vi } from "vitest";
 import { createStripeClient, STRIPE_API_VERSION, planForPriceId } from "./stripe";
+import { createPortalSession, listInvoices } from "./portal";
 import type { StripeLike } from "./types";
+
+// A hand-written fake DB that returns a canned sponsors row for the .from("sponsors")
+// single()-style read the billing helpers perform, and records any update() it receives.
+// Mirrors the injectable-fake approach of lib/advisor/llm.test.ts — no Supabase, no network.
+function fakeDb(sponsorRow: Record<string, unknown>) {
+  const updates: Array<Record<string, unknown>> = [];
+  const db = {
+    from(table: string) {
+      if (table !== "sponsors") throw new Error(`unexpected table ${table}`);
+      return {
+        select: () => ({
+          eq: () => ({
+            maybeSingle: async () => ({ data: sponsorRow, error: null }),
+            single: async () => ({ data: sponsorRow, error: null }),
+          }),
+        }),
+        update(patch: Record<string, unknown>) {
+          updates.push(patch);
+          return { eq: async () => ({ data: null, error: null }) };
+        },
+      };
+    },
+  };
+  return { db: db as unknown as import("@supabase/supabase-js").SupabaseClient, updates };
+}
 
 /** A fully-typed hand-written fake StripeLike — no real SDK, no network, no key. */
 function fakeStripe(): StripeLike {
@@ -97,4 +123,34 @@ test("createStripeClient returns the injected client unchanged (no real SDK cons
     webhooks: { constructEvent: vi.fn() },
   } as unknown as StripeLike;
   expect(createStripeClient({ client: fake })).toBe(fake);
+});
+
+test("createPortalSession ensures a customer then creates a portal session for that customer", async () => {
+  // Sponsor already has a customer id, so ensureStripeCustomer must NOT create a new one.
+  const { db } = fakeDb({
+    id: "sp1",
+    name: "Acme",
+    plan: "team",
+    seats: 5,
+    stripe_customer_id: "cus_existing",
+    stripe_subscription_id: "sub_1",
+    subscription_status: "active",
+  });
+  const portalCreate = vi.fn().mockResolvedValue({ url: "https://billing.stripe.test/session/abc" });
+  const customersCreate = vi.fn(); // should never be called
+  const stripe = {
+    customers: { create: customersCreate },
+    billingPortal: { sessions: { create: portalCreate } },
+  } as unknown as import("./types").StripeLike;
+
+  const out = await createPortalSession(stripe, db, {
+    sponsorId: "sp1",
+    returnUrl: "https://app.test/sponsor/billing",
+  });
+
+  expect(out).toEqual({ url: "https://billing.stripe.test/session/abc" });
+  expect(customersCreate).not.toHaveBeenCalled();
+  const args = portalCreate.mock.calls[0][0] as Record<string, unknown>;
+  expect(args.customer).toBe("cus_existing");
+  expect(args.return_url).toBe("https://app.test/sponsor/billing");
 });
