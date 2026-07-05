@@ -130,6 +130,7 @@ _Produces (SQL surface consumed by Tasks 2–13):_
 - `sponsor_engagement(target_sponsor uuid) returns table(invited int, activated int, imported int, advisor_used int)` — SECURITY DEFINER, guarded.
 - `sponsor_skill_coverage(target_sponsor uuid) returns table(skill_name text, member_count int)` — SECURITY DEFINER, guarded.
 - RLS policies: `cohort_invites_sponsor_all`, `credentials_sponsor_select`, `sponsors_admin_update` (admin updates their own sponsor row — needed for the client-side `stripe_customer_id` write in `ensureStripeCustomer`), `earners_sponsor_select` (a cohort's own sponsor admin may read that member's `earners` row — the handle is already public via `/u/[handle]`; this surfaces which invitees signed up and fixes the null-handle bug).
+  - **0008 narrows the authenticated UPDATE grant on `sponsors` to `stripe_customer_id` only; entitlement columns (`plan`, `seats`, `subscription_status`, `stripe_subscription_id`) are service-role-only (webhook).** `sponsors_admin_update` alone is a whole-row policy and does not restrict columns — see `supabase/migrations/0008_sponsors_column_grants.sql`.
 - Column-level grant fix on `cohort_members` (update restricted to `consent_share_skills`, `consent_share_credentials`) + rebuilt `cohort_members_earner_update` policy with the `earner_id = auth.uid()` row predicate.
 
 ---
@@ -663,6 +664,8 @@ _Produces (SQL surface consumed by Tasks 2–13):_
 
   Append to `supabase/migrations/0007_sponsor_billing.sql`. `cohort_invites_sponsor_all` lets admins manage their own invites (needed for Task 5's insert). `credentials_sponsor_select` mirrors `earner_skills_sponsor_select` (0003) but gates on `consent_share_credentials` — closing the inert-flag gap. `sponsors_admin_update` lets an admin update their OWN sponsor row — required because `ensureStripeCustomer` (Task 10), invoked from the RLS-scoped `startCheckout`/`openBillingPortal` actions, persists `stripe_customer_id` back onto the row under the admin's own `createServerClient()`. The webhook (Task 12) writes the other billing columns via the SERVICE-ROLE key (bypasses RLS), so it does not depend on this policy.
 
+  **Note (0008 follow-up):** `sponsors_admin_update` is a whole-ROW RLS policy — it cannot restrict WHICH COLUMNS an admin may update, so on its own it would let a sponsor admin write `plan`/`seats`/`subscription_status`/`stripe_subscription_id` directly. Migration `0008_sponsors_column_grants.sql` (applied immediately after this file lands) column-scopes the `authenticated` UPDATE grant on `sponsors` to `stripe_customer_id` only, mirroring the `cohort_members` column-grant pattern below. Entitlement columns remain writable only by the service-role webhook.
+
   ```sql
   -- 7) RLS: sponsor admins fully manage their own invites.
   create policy cohort_invites_sponsor_all on cohort_invites
@@ -687,6 +690,10 @@ _Produces (SQL surface consumed by Tasks 2–13):_
   --    stripe_customer_id under the admin's RLS-scoped client during Checkout/Portal.
   --    The Stripe WEBHOOK (Task 12) writes subscription_status/plan/seats/stripe_subscription_id
   --    via the SERVICE-ROLE key (bypasses RLS), so it does not rely on this policy.
+  --    NOTE: this is a whole-ROW policy — it cannot restrict which COLUMNS an admin may write.
+  --    0008_sponsors_column_grants.sql narrows the authenticated UPDATE grant to stripe_customer_id
+  --    only; entitlement columns (plan, seats, subscription_status, stripe_subscription_id) remain
+  --    service-role-only (webhook).
   create policy sponsors_admin_update on sponsors
     for update using (is_sponsor_admin(id))
     with check (is_sponsor_admin(id));
@@ -4936,7 +4943,7 @@ _Consumes:_
 - `StripeLike` and `SponsorRow` from `lib/billing/types.ts` (Task 3).
 - `createStripeClient(opts?: { apiKey?: string; client?: StripeLike }): StripeLike` from `lib/billing/stripe.ts` (Task 3).
 - `requireSponsorAdmin(): Promise<{ userId: string; sponsorId: string }>` from `lib/auth/require-sponsor-admin.ts` (Task 4).
-- `createServerClient()` from `lib/supabase/server.ts`; `sponsors` billing columns from migration 0007 (Task 1): `name`, `stripe_customer_id`.
+- `createServerClient()` from `lib/supabase/server.ts`; `sponsors` billing columns from migration 0007 (Task 1): `name`, `stripe_customer_id`. Note: 0008 narrows the authenticated UPDATE grant on `sponsors` to `stripe_customer_id` only, so `ensureStripeCustomer`'s RLS-scoped write (the `data.stripe_customer_id` column below) is exactly the one column the client role may write — do not extend this function to write any other `sponsors` column under an RLS-scoped client.
 - Active-member count query on `cohort_members` (`status = 'active'`). Task 13 centralizes this as `countActiveMembers(db, sponsorId)`. **T13 is not yet merged, so this task inlines the identical count query in the `startCheckout` action and leaves a `// TODO(Task 13): replace with countActiveMembers()` marker so T13 can refactor it away.**
 
 _Produces:_
@@ -5087,6 +5094,9 @@ export async function startCheckout(formData: FormData): Promise<void>;
    * sponsor, tagged with sponsor_id metadata for webhook reconciliation), writes the id back onto
    * the sponsor row, and returns it. The Supabase client MUST have privileges to update the row
    * (service-role in webhook contexts, or an RLS-authorized sponsor admin via sponsors_admin_update).
+   * NOTE: 0008 narrows the authenticated UPDATE grant on sponsors to stripe_customer_id only;
+   * entitlement columns (plan, seats, subscription_status, stripe_subscription_id) are
+   * service-role-only (webhook) — an RLS-scoped client can write stripe_customer_id and nothing else.
    */
   export async function ensureStripeCustomer(
     stripe: StripeLike,
@@ -6202,7 +6212,7 @@ Consumes:
 - `StripeLike` and its `webhooks.constructEvent(payload, sig, secret)` (now returning `{ id, created, type, data.object }` — Task 3 F5) from `lib/billing/types.ts` (Task 3), plus `createStripeClient({ client? })` and `planForPriceId` / `PLAN_BY_PRICE_ID` from `lib/billing/stripe.ts` (Task 3) — the route builds the real client in production but the test injects a fake `StripeLike`; the dispatcher uses `createStripeClient()` for the live-subscription read and `planForPriceId` to label the plan.
 - The `sponsors` billing columns from migration 0007 (Task 1): `stripe_customer_id`, `stripe_subscription_id`, `subscription_status`, `plan`, `seats`, plus the unique index `sponsors_stripe_customer_id_key` (guarantees the by-customer lookup resolves a single sponsor).
 - The `stripe_events` idempotency ledger from migration 0007 (Task 1) — `handleStripeEvent` INSERTs `event.id` FIRST and treats a 23505 as an already-processed duplicate.
-- A service-role Supabase client (the `adminClient()` pattern from `tests/db/admin-client.ts`) — the webhook bypasses RLS, so no `sponsors` UPDATE / `stripe_events` INSERT policy is required (this is why Task 1 left the webhook path un-policied).
+- A service-role Supabase client (the `adminClient()` pattern from `tests/db/admin-client.ts`) — the webhook bypasses RLS, so no `sponsors` UPDATE / `stripe_events` INSERT policy is required (this is why Task 1 left the webhook path un-policied). This also bypasses the 0008 column-level grant (service role is not `authenticated`), so the webhook remains the only writer of `plan`, `seats`, `subscription_status`, and `stripe_subscription_id`.
 
 Produces:
 ```ts

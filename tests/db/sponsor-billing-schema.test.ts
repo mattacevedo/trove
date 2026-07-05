@@ -292,6 +292,52 @@ test("column-level grant: earner may update consent flags but NOT status/sponsor
   expect(row!.consent_share_skills).toBe(true);
 });
 
+test("a sponsor admin cannot update billing/entitlement columns, only stripe_customer_id", async () => {
+  const owner = await makeUserClient(`bill-owner-${Date.now()}@example.com`);
+  createdUsers.push(owner.userId);
+  const { data: sponsorId } = await owner.client.rpc("create_sponsor", {
+    sponsor_name: "Billing Co",
+  });
+  createdSponsors.push(sponsorId as string);
+
+  // Attempting to self-grant entitlement columns is REJECTED by the column-level grant (0008).
+  const tamperUpd = await owner.client
+    .from("sponsors")
+    .update({
+      subscription_status: "active",
+      plan: "pro",
+      seats: 999,
+      stripe_subscription_id: "sub_fake",
+    })
+    .eq("id", sponsorId as string);
+  expect(tamperUpd.error?.code).toBe("42501");
+
+  // Entitlement columns are unchanged.
+  const { data: unchangedRow } = await admin
+    .from("sponsors")
+    .select("plan, seats, subscription_status, stripe_subscription_id")
+    .eq("id", sponsorId as string)
+    .single();
+  expect(unchangedRow!.plan).toBe("free");
+  expect(unchangedRow!.seats).toBe(0);
+  expect(unchangedRow!.subscription_status).toBe("inactive");
+  expect(unchangedRow!.stripe_subscription_id).toBeNull();
+
+  // stripe_customer_id is the one column the client IS allowed to write.
+  const custUpd = await owner.client
+    .from("sponsors")
+    .update({ stripe_customer_id: "cus_test_123" })
+    .eq("id", sponsorId as string);
+  expect(custUpd.error).toBeNull();
+
+  const { data: updatedRow } = await admin
+    .from("sponsors")
+    .select("stripe_customer_id")
+    .eq("id", sponsorId as string)
+    .single();
+  expect(updatedRow!.stripe_customer_id).toBe("cus_test_123");
+});
+
 test("sponsor_engagement + sponsor_skill_coverage RAISE for a non-admin caller", async () => {
   const owner = await makeUserClient(`eng-owner-${Date.now()}@example.com`);
   createdUsers.push(owner.userId);
