@@ -86,3 +86,15 @@ test("the injected fake exposes the full StripeLike surface used by later tasks"
     data: { object: {} },
   });
 });
+
+test("createStripeClient returns the injected client unchanged (no real SDK constructed)", () => {
+  const fake: StripeLike = {
+    customers: { create: vi.fn() },
+    checkout: { sessions: { create: vi.fn() } },
+    billingPortal: { sessions: { create: vi.fn() } },
+    subscriptions: { retrieve: vi.fn(), update: vi.fn() },
+    invoices: { list: vi.fn() },
+    webhooks: { constructEvent: vi.fn() },
+  } as unknown as StripeLike;
+  expect(createStripeClient({ client: fake })).toBe(fake);
+});
