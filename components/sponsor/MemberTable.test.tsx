@@ -1,5 +1,6 @@
 import { render, screen, within } from "@testing-library/react";
 import { expect, test } from "vitest";
+import userEvent from "@testing-library/user-event";
 import { MemberTable } from "./MemberTable";
 
 const rows = [
@@ -52,4 +53,27 @@ test("renders an empty state when there are no members", () => {
   render(<MemberTable rows={[]} />);
   expect(screen.getByText(/no members yet/i)).toBeInTheDocument();
   expect(screen.queryByRole("table")).toBeNull();
+});
+
+test("clicking a column header sorts and updates aria-sort", async () => {
+  const user = userEvent.setup();
+  render(<MemberTable rows={rows} />);
+  const memberHeaderButton = screen.getByRole("button", { name: /member/i });
+  const memberHeader = memberHeaderButton.closest("th") as HTMLTableCellElement;
+
+  // First click on a not-yet-active column sorts ascending.
+  await user.click(memberHeaderButton);
+  expect(memberHeader).toHaveAttribute("aria-sort", "ascending");
+
+  // First body row is a row-header (<th scope="row">). The sort runs on the raw `handle` field
+  // via String(handle ?? ""), so a null handle collapses to "" which sorts before "ada"
+  // ascending — "Pending sign-up" is first, "@ada" second.
+  const bodyRowHeaders = screen
+    .getAllByRole("rowheader")
+    .map((el) => el.textContent);
+  expect(bodyRowHeaders[0]).toBe("Pending sign-up");
+
+  // Clicking the same header again flips direction.
+  await user.click(memberHeaderButton);
+  expect(memberHeader).toHaveAttribute("aria-sort", "descending");
 });
