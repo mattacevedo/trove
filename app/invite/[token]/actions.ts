@@ -1,12 +1,12 @@
 "use server";
 
-import { createClient } from "@supabase/supabase-js";
 import { redirect } from "next/navigation";
 import { createServerClient } from "@/lib/supabase/server";
 import { requireUserId } from "@/lib/auth/require-user";
 import { provisionEarner } from "@/lib/auth/provision-earner";
 import { createStripeClient } from "@/lib/billing/stripe";
 import { syncSubscriptionSeats } from "@/lib/billing/seats";
+import { createServiceRoleClient } from "@/lib/supabase/service";
 
 export async function acceptInvite(formData: FormData): Promise<void> {
   const token = String(formData.get("token") ?? "").trim();
@@ -43,11 +43,7 @@ export async function acceptInvite(formData: FormData): Promise<void> {
   // log and fall through to the same redirect; the webhook's subscription.updated handler is the
   // durable backstop that reconciles seats later.
   try {
-    const admin = createClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.SUPABASE_SERVICE_ROLE_KEY!,
-      { auth: { autoRefreshToken: false, persistSession: false } }
-    );
+    const admin = createServiceRoleClient();
     await syncSubscriptionSeats(createStripeClient(), admin, sponsorId as string);
   } catch (syncError) {
     console.error("[acceptInvite] seat sync failed (best-effort, membership already committed):", syncError);

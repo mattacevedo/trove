@@ -149,3 +149,46 @@ test("returns 200 with handled:false for an uninteresting but validly-signed eve
   expect(res.status).toBe(200);
   expect(db.updates).toHaveLength(0);
 });
+
+test("F4: a handleStripeEvent throw is mapped to a 500 response (preserves Stripe retry semantics)", async () => {
+  // A valid, well-signed event whose dispatch throws (e.g. a DB error inside handleStripeEvent) must
+  // surface as a 500 so Stripe retries the delivery, rather than escaping as an unhandled exception.
+  const constructEvent = vi.fn().mockReturnValue({
+    id: "evt_route_throws",
+    created: 1,
+    type: "customer.subscription.created",
+    data: {
+      object: {
+        id: "sub_123",
+        customer: "cus_abc",
+        status: "active",
+        items: { data: [{ price: { id: "price_x" } }] },
+      },
+    },
+  });
+  const stripe = fakeStripe(constructEvent);
+  // A db whose sponsors update throws inside handleStripeEvent's created branch.
+  const throwingDb = {
+    from(table: string) {
+      if (table === "stripe_events") {
+        return { insert: () => Promise.resolve({ error: null }) };
+      }
+      return {
+        select() {
+          return { eq() { return { maybeSingle: async () => ({ data: { id: "sp_1", stripe_subscription_id: null }, error: null }) }; } };
+        },
+        update() {
+          return { eq: () => Promise.resolve({ error: { message: "connection reset" } }) };
+        },
+      };
+    },
+  } as unknown as SupabaseClient;
+
+  const res = await handlePost(makeRequest("{}", "t=1,v1=goodsig"), {
+    stripe,
+    db: throwingDb,
+    webhookSecret: "whsec_test",
+  });
+
+  expect(res.status).toBe(500);
+});

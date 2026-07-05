@@ -42,7 +42,16 @@ export async function handlePost(
     return NextResponse.json({ error: "invalid signature" }, { status: 400 });
   }
 
-  await handleStripeEvent(deps.db, event);
+  try {
+    await handleStripeEvent(deps.db, event);
+  } catch (err) {
+    // A thrown error here (e.g. a PostgREST failure) means the event was NOT durably applied. Map
+    // it to a 500 so Stripe's automatic retry logic re-delivers this event, instead of letting the
+    // exception escape as an unmapped framework-level 500 (which happens to also be a 500, but is
+    // not something this route asserts or controls the shape of).
+    console.error("[stripe webhook] handleStripeEvent threw:", err);
+    return NextResponse.json({ error: "internal error" }, { status: 500 });
+  }
   return NextResponse.json({ received: true }, { status: 200 });
 }
 

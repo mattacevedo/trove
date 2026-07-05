@@ -1,22 +1,37 @@
 import { expect, test, vi, beforeEach } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+// The exact return shape of StripeLike.subscriptions.retrieve (mirrors lib/billing/types.ts).
+// `makeRetrieve`'s fn is explicitly annotated to return THIS shape (with optional quantity/price per
+// item) so every reassignment of subRetrieve across this file — regardless of which optional fields a
+// given test includes — type-checks against the same signature instead of vi.hoisted inferring a
+// narrower one from the first literal.
+type RetrieveResult = {
+  id: string;
+  status: string;
+  items: { data: Array<{ id: string; quantity?: number; price?: { id: string } }> };
+};
+
 // Mutable fake Stripe surface, defined via vi.hoisted so the (hoisted) vi.mock factory below can
 // safely reference it. Task 12 needs subscriptions.retrieve for the live-truth read on
 // customer.subscription.updated; Task 13 later drives subscriptions.update through the SAME fake.
 // Default retrieve reports an ACTIVE subscription; individual tests reassign subRetrieve as needed.
 const stripeFake = vi.hoisted(() => {
   const makeRetrieve = () =>
-    vi.fn(async (id: string) => ({
+    vi.fn(async (id: string): Promise<RetrieveResult> => ({
       id,
       status: "active",
-      items: { data: [{ id: "si_live", quantity: 1 }] },
+      items: { data: [{ id: "si_live", quantity: 1, price: { id: "price_x" } }] },
     }));
   return {
     subRetrieve: makeRetrieve(),
     // Typed with the same (id, args) arity as StripeLike.subscriptions.update (lib/billing/types.ts)
     // so the mock factory below can forward both arguments; Task 13 asserts on the `args` payload.
     subUpdate: vi.fn(async (id: string, args: unknown) => ({ id, args })),
+    // Records every priceId passed into planForPriceId, so F2 tests can assert webhook.ts derives
+    // plan from the LIVE object's price id rather than the event payload's, WITHOUT needing
+    // STRIPE_PRICE_ID/PLAN_BY_PRICE_ID (fixed at module-eval time, can't be changed per-test).
+    planForPriceIdCalls: [] as Array<string | null | undefined>,
     makeRetrieve,
   };
 });
@@ -24,13 +39,19 @@ const stripeFake = vi.hoisted(() => {
 vi.mock("@/lib/billing/stripe", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/billing/stripe")>();
   return {
-    ...actual, // keep the real planForPriceId / PLAN_BY_PRICE_ID
+    ...actual, // keep the real PLAN_BY_PRICE_ID
     createStripeClient: () => ({
       subscriptions: {
         retrieve: (id: string) => stripeFake.subRetrieve(id),
         update: (id: string, args: unknown) => stripeFake.subUpdate(id, args),
       },
     }),
+    // Spy wrapper: records the priceId argument, then delegates to the REAL implementation so
+    // behavior (including the "free" fallback) is unchanged.
+    planForPriceId: (priceId: string | null | undefined) => {
+      stripeFake.planForPriceIdCalls.push(priceId);
+      return actual.planForPriceId(priceId);
+    },
   };
 });
 
@@ -47,6 +68,7 @@ beforeEach(() => {
   stripeFake.subUpdate = vi.fn(async (id: string, args: unknown) => ({ id, args }));
   subRetrieve = stripeFake.subRetrieve;
   subUpdate = stripeFake.subUpdate;
+  stripeFake.planForPriceIdCalls = [];
 });
 
 /**
@@ -141,6 +163,24 @@ test("customer.subscription.created writes status/id/plan keyed by stripe_custom
   expect(updates[0].values).not.toHaveProperty("seats");
 });
 
+test("F3: customer.subscription.created for an unknown customer is handled:false with no write (consistent with updated/invoice)", async () => {
+  const { client, updates } = fakeDb({ sponsorRow: null });
+  const out = await handleStripeEvent(client, {
+    id: "evt_created_unknown_customer",
+    type: "customer.subscription.created",
+    data: {
+      object: {
+        id: "sub_999",
+        customer: "cus_unknown",
+        status: "active",
+        items: { data: [{ price: { id: "price_x" } }] },
+      },
+    },
+  });
+  expect(out).toEqual({ handled: false });
+  expect(updates).toHaveLength(0);
+});
+
 test("customer.subscription.updated writes the LIVE status, not the (stale) event payload", async () => {
   // Event payload SAYS active, but the live subscription is past_due — live must win.
   // Reassign on stripeFake (the object the mock factory reads), not just the local alias.
@@ -176,6 +216,60 @@ test("customer.subscription.updated writes the LIVE status, not the (stale) even
   expect(statusWrite!.values).not.toHaveProperty("seats");
 });
 
+test("F2: customer.subscription.updated derives `plan` from the LIVE item's price, not the event payload's", async () => {
+  // Live retrieve reports one price; the event payload (stale) claims a DIFFERENT one. Assert
+  // planForPriceId is invoked with the LIVE price id, never the event's — this fails against the old
+  // implementation (which called planForPriceId(firstPriceId(object)), i.e. the event payload).
+  stripeFake.subRetrieve = vi.fn(async (id: string) => ({
+    id,
+    status: "active",
+    items: { data: [{ id: "si_live", quantity: 3, price: { id: "price_live_team" } }] },
+  }));
+  subRetrieve = stripeFake.subRetrieve;
+  const { client } = fakeDb({ sponsorRow: { id: "sp_1", stripe_subscription_id: "sub_123" } });
+  const out = await handleStripeEvent(client, {
+    id: "evt_updated_plan_live",
+    type: "customer.subscription.updated",
+    data: {
+      object: {
+        id: "sub_123",
+        customer: "cus_abc",
+        status: "active",
+        items: { data: [{ price: { id: "price_event_stale" } }] }, // stale/mismatched payload price
+      },
+    },
+  });
+  expect(out).toEqual({ handled: true });
+  expect(stripeFake.planForPriceIdCalls).toContain("price_live_team");
+  expect(stripeFake.planForPriceIdCalls).not.toContain("price_event_stale");
+});
+
+test("F2: customer.subscription.updated falls back to the event payload's price when the live item lacks one", async () => {
+  // Live item has NO price (defensive case — StripeLike types price as optional). The fallback
+  // still reads from the event payload rather than silently mapping to 'free'.
+  stripeFake.subRetrieve = vi.fn(async (id: string) => ({
+    id,
+    status: "active",
+    items: { data: [{ id: "si_live", quantity: 3 }] },
+  }));
+  subRetrieve = stripeFake.subRetrieve;
+  const { client } = fakeDb({ sponsorRow: { id: "sp_1", stripe_subscription_id: "sub_123" } });
+  const out = await handleStripeEvent(client, {
+    id: "evt_updated_plan_fallback",
+    type: "customer.subscription.updated",
+    data: {
+      object: {
+        id: "sub_123",
+        customer: "cus_abc",
+        status: "active",
+        items: { data: [{ price: { id: "price_live_team" } }] },
+      },
+    },
+  });
+  expect(out).toEqual({ handled: true });
+  expect(stripeFake.planForPriceIdCalls).toContain("price_live_team"); // fell back to the event's price id
+});
+
 test("customer.subscription.deleted marks the sponsor canceled and clears the subscription id", async () => {
   const { client, updates } = fakeDb();
   const out = await handleStripeEvent(client, {
@@ -209,6 +303,149 @@ test("a stale customer.subscription.updated after deletion does NOT re-activate 
     subscription_status: "canceled",
     stripe_subscription_id: null,
   });
+});
+
+/**
+ * A stateful fake db (unlike `fakeDb`, whose sponsors row is a static snapshot): the sponsors
+ * `select` reflects whatever the LAST `update` wrote, so a sequence of handleStripeEvent calls can
+ * be driven against it and each subsequent read sees prior writes — needed to reproduce the
+ * resurrection-ordering hole (deleted -> stale updated for the SAME old sub id).
+ */
+function statefulFakeDb(initialRow: Record<string, unknown>) {
+  const updates: Array<{ table: string; values: Record<string, unknown>; eqCol: string; eqVal: unknown }> = [];
+  const seenEvents = new Set<string>();
+  let sponsorRow: Record<string, unknown> | null = { ...initialRow };
+
+  const client = {
+    from(table: string) {
+      if (table === "stripe_events") {
+        return {
+          insert(row: { id: string }) {
+            if (seenEvents.has(row.id)) {
+              return Promise.resolve({ error: { code: "23505", message: "duplicate key" } });
+            }
+            seenEvents.add(row.id);
+            return Promise.resolve({ error: null });
+          },
+        };
+      }
+      // sponsors
+      return {
+        select() {
+          return {
+            eq() {
+              return {
+                maybeSingle: async () => ({ data: sponsorRow, error: null }),
+              };
+            },
+          };
+        },
+        update(values: Record<string, unknown>) {
+          return {
+            eq(eqCol: string, eqVal: unknown) {
+              updates.push({ table, values, eqCol, eqVal });
+              if (sponsorRow) sponsorRow = { ...sponsorRow, ...values };
+              return Promise.resolve({ error: null });
+            },
+          };
+        },
+      };
+    },
+  } as unknown as SupabaseClient;
+  return { client, updates, getSponsorRow: () => sponsorRow };
+}
+
+test("F1: a stale 'updated' for the OLD sub id after deletion does NOT resurrect, even when live retrieve reports active", async () => {
+  // Reproduces the resurrection-ordering hole: .deleted sets status=canceled + clears the sub id;
+  // a LATE .updated for that SAME old sub id arrives whose live retrieve (implausibly, but this is
+  // exactly the adversarial case) reports an ACTIVE-looking object. Nothing local should let this
+  // re-write status/plan/sub id, because the sponsor's CURRENT stripe_subscription_id no longer
+  // matches (it's null after deletion) — the event is stale by construction.
+  const { client, updates, getSponsorRow } = statefulFakeDb({
+    id: "sp_1",
+    stripe_subscription_id: "sub_OLD",
+  });
+
+  const deletedOut = await handleStripeEvent(client, {
+    id: "evt_del_1",
+    type: "customer.subscription.deleted",
+    data: { object: { id: "sub_OLD", customer: "cus_abc", status: "canceled", items: { data: [] } } },
+  });
+  expect(deletedOut).toEqual({ handled: true });
+  expect(getSponsorRow()).toMatchObject({ subscription_status: "canceled", stripe_subscription_id: null });
+
+  // The live retrieve for sub_OLD (implausibly) reports active — Stripe would never really do this
+  // for a subscription that was just deleted, but the fix must not DEPEND on that never happening.
+  stripeFake.subRetrieve = vi.fn(async (id: string) => ({
+    id,
+    status: "active",
+    items: { data: [{ id: "si_live", price: { id: "price_x" } }] },
+  }));
+
+  const updatesBefore = updates.length;
+  const staleUpdatedOut = await handleStripeEvent(client, {
+    id: "evt_upd_stale_after_delete",
+    type: "customer.subscription.updated",
+    data: {
+      object: { id: "sub_OLD", customer: "cus_abc", status: "active", items: { data: [{ price: { id: "price_x" } }] } },
+    },
+  });
+
+  // No NEW write happened, and the row is still exactly as .deleted left it.
+  expect(updates.length).toBe(updatesBefore);
+  expect(staleUpdatedOut).toEqual({ handled: false });
+  expect(getSponsorRow()).toMatchObject({ subscription_status: "canceled", stripe_subscription_id: null });
+});
+
+test("F1 control: a NEW sub id after a prior deletion DOES activate (no false lockout)", async () => {
+  // A genuinely new subscription (fresh checkout) must still activate normally even though the
+  // sponsor's row was previously canceled by an earlier deletion.
+  const { client, updates, getSponsorRow } = statefulFakeDb({
+    id: "sp_1",
+    stripe_subscription_id: "sub_OLD",
+  });
+
+  await handleStripeEvent(client, {
+    id: "evt_del_2",
+    type: "customer.subscription.deleted",
+    data: { object: { id: "sub_OLD", customer: "cus_abc", status: "canceled", items: { data: [] } } },
+  });
+  expect(getSponsorRow()).toMatchObject({ stripe_subscription_id: null });
+
+  // New checkout produces a NEW subscription id; created branch activates it.
+  const createdOut = await handleStripeEvent(client, {
+    id: "evt_created_after_delete",
+    type: "customer.subscription.created",
+    data: {
+      object: {
+        id: "sub_NEW",
+        customer: "cus_abc",
+        status: "active",
+        items: { data: [{ price: { id: "price_x" } }] },
+      },
+    },
+  });
+  expect(createdOut).toEqual({ handled: true });
+  expect(getSponsorRow()).toMatchObject({
+    subscription_status: "active",
+    stripe_subscription_id: "sub_NEW",
+  });
+
+  // A subsequent legitimate .updated for the NEW sub id (live retrieve active) also applies.
+  stripeFake.subRetrieve = vi.fn(async (id: string) => ({
+    id,
+    status: "active",
+    items: { data: [{ id: "si_live", price: { id: "price_x" } }] },
+  }));
+  const updatedOut = await handleStripeEvent(client, {
+    id: "evt_updated_new_sub",
+    type: "customer.subscription.updated",
+    data: {
+      object: { id: "sub_NEW", customer: "cus_abc", status: "active", items: { data: [{ price: { id: "price_x" } }] } },
+    },
+  });
+  expect(updatedOut).toEqual({ handled: true });
+  expect(updates.some((u) => u.values.stripe_subscription_id === "sub_NEW" && u.values.subscription_status === "active")).toBe(true);
 });
 
 test("a duplicate event id is applied only once (idempotency via stripe_events)", async () => {

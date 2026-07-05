@@ -9,13 +9,27 @@
 // Correctness invariants baked in here:
 //   • Idempotency: we INSERT event.id into stripe_events FIRST; a duplicate (23505) short-circuits
 //     with { handled: true } and NO side effects, so retried/duplicated deliveries apply once.
-//   • Out-of-order safety: for customer.subscription.updated we resolve the LIVE subscription via
-//     subscriptions.retrieve and write its authoritative status — a stale event payload never wins.
-//   • Terminal delete: customer.subscription.deleted sets 'canceled' + clears the id; and an
-//     'updated' whose live retrieve reports canceled/not-found does NOT resurrect the subscription.
+//   • Out-of-order safety, two layers, for customer.subscription.updated:
+//       1. LOCAL terminality guard: we resolve the sponsor row FIRST (by stripe_customer_id) and
+//          compare the event's subscription id against the sponsor's CURRENT
+//          stripe_subscription_id. If it's null or different, the event is stale relative to what
+//          we already know (e.g. a .deleted for that exact sub already cleared/replaced it) and we
+//          bail with { handled: false } WITHOUT calling Stripe or writing anything. This does not
+//          depend on Stripe ever refusing to return "active" for an old subscription id.
+//       2. LIVE read: once the id matches, we still resolve the LIVE subscription via
+//          subscriptions.retrieve and write ITS authoritative status/plan — the event payload's
+//          status is never trusted, and neither is its price: plan is derived from
+//          planForPriceId(<LIVE item's price id>), falling back to the event payload's price only
+//          if the live item lacks one (defensive — StripeLike types price as optional).
+//   • Terminal delete: customer.subscription.deleted sets 'canceled' + clears the id. Combined with
+//     the local terminality guard above, a later 'updated' for that same (now-stale) subscription id
+//     cannot resurrect it — regardless of what its live retrieve reports.
 //   • Plan label comes from the stable PLAN_BY_PRICE_ID map (price.id), never price.nickname.
 //   • Seats are NOT written here — reconciliation (Task 13, syncSubscriptionSeats) is the SOLE
 //     writer of sponsors.seats.
+//   • Unknown customers: created/updated/invoice.* all resolve the sponsor row FIRST and return
+//     { handled: false } (no write, no throw) when the Stripe customer id matches no sponsor —
+//     consistent treatment across every branch that keys off stripe_customer_id.
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { createStripeClient, planForPriceId } from "@/lib/billing/stripe";
@@ -32,18 +46,22 @@ function firstPriceId(object: Record<string, unknown>): string | null {
   return asString(price?.id);
 }
 
-/** Resolve the sponsor id for a Stripe customer; null if no sponsor matches. */
-async function sponsorIdForCustomer(
+/** Resolve {id, stripe_subscription_id} for a Stripe customer; null if no sponsor matches. */
+async function sponsorForCustomer(
   db: SupabaseClient,
   customerId: string
-): Promise<string | null> {
+): Promise<{ id: string; stripeSubscriptionId: string | null } | null> {
   const { data, error } = await db
     .from("sponsors")
-    .select("id")
+    .select("id, stripe_subscription_id")
     .eq("stripe_customer_id", customerId)
     .maybeSingle();
   if (error) throw new Error(`sponsor lookup failed: ${error.message}`);
-  return (data?.id as string | undefined) ?? null;
+  if (!data) return null;
+  return {
+    id: data.id as string,
+    stripeSubscriptionId: (data.stripe_subscription_id as string | null) ?? null,
+  };
 }
 
 /** Apply an update to the sponsors row matched by stripe_customer_id; throw on PostgREST error. */
@@ -86,6 +104,12 @@ export async function handleStripeEvent(
       const subscriptionId = asString(object.id);
       const status = asString(object.status);
       if (!customerId || !subscriptionId || !status) return { handled: false };
+
+      // Consistent with updated/invoice: resolve the sponsor first. An unknown customer is not an
+      // error (e.g. test-mode noise, a customer created outside our flow) — handled:false, no write.
+      const sponsor = await sponsorForCustomer(db, customerId);
+      if (!sponsor) return { handled: false };
+
       const values: Record<string, unknown> = {
         subscription_status: status,
         stripe_subscription_id: subscriptionId,
@@ -100,12 +124,24 @@ export async function handleStripeEvent(
       const subscriptionId = asString(object.id);
       if (!customerId || !subscriptionId) return { handled: false };
 
-      const sponsorId = await sponsorIdForCustomer(db, customerId);
-      if (!sponsorId) return { handled: false };
+      const sponsor = await sponsorForCustomer(db, customerId);
+      if (!sponsor) return { handled: false };
+
+      // Local terminality guard (independent of whatever Stripe's live retrieve reports): if the
+      // sponsor's CURRENT stripe_subscription_id is null or differs from this event's subscription,
+      // the event is stale relative to what we already know locally (e.g. a .deleted for this exact
+      // sub already cleared/replaced it). Do NOT write status/plan/sub id in that case — a NEW
+      // subscription still activates via the created branch above, which sets the new sub id first.
+      if (sponsor.stripeSubscriptionId === null || sponsor.stripeSubscriptionId !== subscriptionId) {
+        return { handled: false };
+      }
 
       // Out-of-order safety: read the LIVE subscription, not the (possibly stale) event payload.
       const stripe = createStripeClient();
-      let live: { status: string; items: { data: Array<{ id: string; quantity?: number }> } } | null;
+      let live: {
+        status: string;
+        items: { data: Array<{ id: string; quantity?: number; price?: { id: string } }> };
+      } | null;
       try {
         live = await stripe.subscriptions.retrieve(subscriptionId);
       } catch {
@@ -121,12 +157,15 @@ export async function handleStripeEvent(
         return { handled: true };
       }
 
-      // Authoritative status/plan from the live object. Seats are NOT written here — Task 13's
-      // reconciliation (appended below in that task) is the sole writer of sponsors.seats.
+      // Status AND plan are both derived from the LIVE object — the event payload is never trusted
+      // for either. `firstPriceId` reads whichever object it is given; pass the LIVE item's price so
+      // plan tracks the authoritative subscription, falling back to the event payload's price only
+      // if the live item is missing one (defensive — StripeLike types price as optional).
+      const livePriceId = firstPriceId(live) ?? firstPriceId(object);
       await updateSponsorByCustomer(db, customerId, {
         subscription_status: live.status,
         stripe_subscription_id: subscriptionId,
-        plan: planForPriceId(firstPriceId(object)),
+        plan: planForPriceId(livePriceId),
       });
       return { handled: true };
     }
@@ -134,8 +173,9 @@ export async function handleStripeEvent(
     case "customer.subscription.deleted": {
       const customerId = asString(object.customer);
       if (!customerId) return { handled: false };
-      // Terminal: canceled + cleared id. A later stale 'updated' cannot re-activate (its live
-      // retrieve returns canceled/not-found, which the updated branch also treats as terminal).
+      // Terminal: canceled + cleared id. A later stale 'updated' for this same subscription id
+      // cannot re-activate it — the updated branch's local terminality guard rejects any event whose
+      // subscription id no longer matches the sponsor's current stripe_subscription_id (now null).
       await updateSponsorByCustomer(db, customerId, {
         subscription_status: "canceled",
         stripe_subscription_id: null,
