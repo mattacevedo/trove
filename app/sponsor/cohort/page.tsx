@@ -26,7 +26,12 @@ export default async function CohortPage() {
   const memberRows: CohortRosterRow[] = (members ?? []).map((m) => {
     const earner = m.earners as { handle: string | null } | { handle: string | null }[] | null;
     const handle = Array.isArray(earner) ? earner[0]?.handle ?? null : earner?.handle ?? null;
-    return { email: handle ?? "(member)", status: m.status as string, accepted: true };
+    return {
+      email: handle ?? "(member)",
+      status: m.status as string,
+      accepted: true,
+      earnerId: m.earner_id as string,
+    };
   });
   const inviteRows: CohortRosterRow[] = (invites ?? []).map((i) => ({
     email: i.email as string,
