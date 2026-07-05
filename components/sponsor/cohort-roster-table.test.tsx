@@ -14,7 +14,7 @@ test("renders members and pending invites with status text (no color-only signal
   expect(screen.getByText("member@x.com")).toBeInTheDocument();
   expect(screen.getByText("pending@x.com")).toBeInTheDocument();
   expect(screen.getByText(/active/i)).toBeInTheDocument();
-  expect(screen.getByText(/pending/i)).toBeInTheDocument();
+  expect(screen.getByText("Invite sent")).toBeInTheDocument();
   // The table has a caption or column header for accessibility.
   expect(screen.getByRole("table")).toBeInTheDocument();
   expect(screen.getByRole("columnheader", { name: /email/i })).toBeInTheDocument();

@@ -12,14 +12,26 @@ export function generateInviteToken(): string {
   return randomBytes(32).toString("base64url");
 }
 
+/** Escapes the characters that matter for safe interpolation into HTML text content
+ *  (& < > " '). Sponsor-supplied names are untrusted input — see inviteEmail below. */
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 function inviteEmail(sponsorName: string, link: string): { subject: string; htmlBody: string; textBody: string } {
   const subject = `${sponsorName} invited you to Trove`;
   const textBody =
     `${sponsorName} invited you to join their cohort on Trove — your free, standards-based ` +
     `credential wallet.\n\nAccept your invitation:\n${link}\n\n` +
     `You control what you share. Sponsors only see data you explicitly consent to.`;
+  const safeSponsorName = escapeHtml(sponsorName);
   const htmlBody =
-    `<p>${sponsorName} invited you to join their cohort on <strong>Trove</strong> — ` +
+    `<p>${safeSponsorName} invited you to join their cohort on <strong>Trove</strong> — ` +
     `your free, standards-based credential wallet.</p>` +
     `<p><a href="${link}">Accept your invitation</a></p>` +
     `<p>You control what you share. Sponsors only see data you explicitly consent to.</p>`;

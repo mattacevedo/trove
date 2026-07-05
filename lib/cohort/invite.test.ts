@@ -112,6 +112,24 @@ test("skips an already-invited email (unique collision) without sending or throw
   expect((send.mock.calls[0][0] as { to: string }).to).toBe("fresh@x.com");
 });
 
+test("escapes HTML in sponsorName within htmlBody but keeps textBody raw", async () => {
+  const { db } = fakeDb();
+  const { sender, send } = fakeSender();
+  const evilName = "Evil <img src=x onerror=alert(1)> Org";
+  await inviteCohort(db, sender, {
+    sponsorId: "sp1",
+    sponsorName: evilName,
+    emails: ["a@x.com"],
+    origin: "https://trove.test",
+  });
+
+  expect(send).toHaveBeenCalledTimes(1);
+  const call = send.mock.calls[0][0] as { htmlBody: string; textBody: string };
+  expect(call.htmlBody).not.toContain("<img");
+  expect(call.htmlBody).toContain("&lt;img");
+  expect(call.textBody).toContain(evilName);
+});
+
 test("does not send an email if the insert failed for a non-collision reason", async () => {
   // Force a non-23505 error by monkeypatching the chain to reject-shape.
   const send = vi.fn();
