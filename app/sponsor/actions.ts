@@ -10,8 +10,9 @@ import { inviteCohort as inviteCohortLib } from "@/lib/cohort/invite";
 import { createPostmarkSender } from "@/lib/email/postmark";
 import { createStripeClient } from "@/lib/billing/stripe";
 import { createCheckoutSession, SubscriptionAlreadyExistsError } from "@/lib/billing/checkout";
-import { countActiveMembers } from "@/lib/billing/seats";
+import { countActiveMembers, syncSubscriptionSeats } from "@/lib/billing/seats";
 import { createPortalSession } from "@/lib/billing/portal";
+import { createServiceRoleClient } from "@/lib/supabase/service";
 
 /**
  * Create a new sponsor organization for the current user via the create_sponsor RPC
@@ -134,4 +135,49 @@ export async function openBillingPortal(_formData: FormData): Promise<void> {
     returnUrl: `${origin}/sponsor/billing`,
   });
   redirect(url);
+}
+
+/**
+ * Soft-remove a cohort member (status -> 'removed'), then reconcile the sponsor's Stripe seat
+ * count so the sponsor stops paying for the freed seat.
+ *
+ * requireSponsorAdmin() runs FIRST and is the sole authorization gate: it resolves sponsorId from
+ * the caller's own sponsor_admins row, so nothing here trusts client-supplied sponsor data.
+ *
+ * The actual write goes through the SERVICE-ROLE client, not the admin's RLS-scoped
+ * createServerClient. Migration 0007 revoked UPDATE on cohort_members from `authenticated` and
+ * granted back only the two consent columns (consent_share_skills, consent_share_credentials) —
+ * that column-privilege grant binds ALL authenticated users, including sponsor admins. A
+ * status='removed' write under the RLS client would fail with Postgres 42501, exactly like the
+ * bug the accept-invite flow (Task 6) hit against sponsors.seats. So: authorize under RLS
+ * (requireSponsorAdmin), then perform the privileged write with the service-role client — mirroring
+ * acceptInvite's pattern in app/invite/[token]/actions.ts. The WHERE clause still pins BOTH
+ * sponsor_id and earner_id so an admin can only ever affect their own org's membership row, even
+ * though the service-role client itself bypasses RLS.
+ *
+ * Seat sync runs on the same service-role client afterward (mirrors the accept-flow pattern) and is
+ * best-effort: wrapped in try/catch so a Stripe hiccup can never turn a successful removal into a
+ * failure. The webhook's subscription.updated reconciliation is the durable backstop.
+ */
+export async function removeMember(formData: FormData): Promise<void> {
+  const { sponsorId } = await requireSponsorAdmin();
+  const earnerId = String(formData.get("earnerId") ?? "").trim();
+  if (!earnerId) redirect("/sponsor/cohort?error=missing_member");
+
+  const admin = createServiceRoleClient();
+  const { error } = await admin
+    .from("cohort_members")
+    .update({ status: "removed" })
+    .eq("sponsor_id", sponsorId)
+    .eq("earner_id", earnerId);
+  if (error) redirect("/sponsor/cohort?error=remove_failed");
+
+  try {
+    await syncSubscriptionSeats(createStripeClient(), admin, sponsorId);
+  } catch (syncError) {
+    console.error("[removeMember] seat sync failed (best-effort, removal already committed):", syncError);
+  }
+
+  revalidatePath("/sponsor/cohort");
+  redirect("/sponsor/cohort");
 }
