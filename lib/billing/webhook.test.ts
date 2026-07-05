@@ -14,7 +14,9 @@ const stripeFake = vi.hoisted(() => {
     }));
   return {
     subRetrieve: makeRetrieve(),
-    subUpdate: vi.fn(async (id: string) => ({ id })),
+    // Typed with the same (id, args) arity as StripeLike.subscriptions.update (lib/billing/types.ts)
+    // so the mock factory below can forward both arguments; Task 13 asserts on the `args` payload.
+    subUpdate: vi.fn(async (id: string, args: unknown) => ({ id, args })),
     makeRetrieve,
   };
 });
@@ -37,11 +39,12 @@ import { handleStripeEvent } from "./webhook";
 // Convenience aliases so individual tests can reassign the fakes ergonomically.
 let subRetrieve = stripeFake.subRetrieve;
 let subUpdate = stripeFake.subUpdate;
+void subUpdate; // referenced by Task 13's reconciliation tests appended to this file; unused here.
 
 beforeEach(() => {
   // Reset to the default active-subscription behavior before each test.
   stripeFake.subRetrieve = stripeFake.makeRetrieve();
-  stripeFake.subUpdate = vi.fn(async (id: string) => ({ id }));
+  stripeFake.subUpdate = vi.fn(async (id: string, args: unknown) => ({ id, args }));
   subRetrieve = stripeFake.subRetrieve;
   subUpdate = stripeFake.subUpdate;
 });
