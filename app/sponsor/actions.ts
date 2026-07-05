@@ -44,10 +44,8 @@ export async function inviteCohort(formData: FormData): Promise<void> {
   const sponsorName = (sponsor?.name as string | null) ?? "Your sponsor";
 
   const hdrs = await headers();
-  const origin =
-    hdrs.get("origin") ??
-    (hdrs.get("host") ? `https://${hdrs.get("host")}` : "") ??
-    "";
+  const host = hdrs.get("host");
+  const origin = hdrs.get("origin") ?? (host ? `https://${host}` : "");
 
   await inviteCohortLib(supabase, createPostmarkSender(), {
     sponsorId,
