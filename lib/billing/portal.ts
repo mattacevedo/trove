@@ -24,3 +24,32 @@ export async function createPortalSession(
   });
   return { url: session.url };
 }
+
+/**
+ * List the sponsor's recent invoices (newest first, as Stripe returns them). Reads the persisted
+ * stripe_customer_id; if the sponsor has never checked out there is no customer, so we short-circuit
+ * to [] WITHOUT touching Stripe. Maps snake_case Stripe fields → the camelCase shape the UI expects.
+ */
+export async function listInvoices(
+  stripe: StripeLike,
+  db: SupabaseClient,
+  sponsorId: string
+): Promise<Array<{ id: string; status: string | null; amountPaid: number; hostedUrl: string | null; created: number }>> {
+  const { data: sponsor } = await db
+    .from("sponsors")
+    .select("stripe_customer_id")
+    .eq("id", sponsorId)
+    .single();
+
+  const customerId = (sponsor?.stripe_customer_id as string | null) ?? null;
+  if (!customerId) return [];
+
+  const result = await stripe.invoices.list({ customer: customerId, limit: 12 });
+  return result.data.map((inv) => ({
+    id: inv.id,
+    status: inv.status,
+    amountPaid: inv.amount_paid,
+    hostedUrl: inv.hosted_invoice_url,
+    created: inv.created,
+  }));
+}

@@ -154,3 +154,67 @@ test("createPortalSession ensures a customer then creates a portal session for t
   expect(args.customer).toBe("cus_existing");
   expect(args.return_url).toBe("https://app.test/sponsor/billing");
 });
+
+test("listInvoices maps Stripe invoice fields to camelCase for a sponsor with a customer", async () => {
+  const { db } = fakeDb({
+    id: "sp1",
+    name: "Acme",
+    plan: "team",
+    seats: 5,
+    stripe_customer_id: "cus_existing",
+    stripe_subscription_id: "sub_1",
+    subscription_status: "active",
+  });
+  const invoicesList = vi.fn().mockResolvedValue({
+    data: [
+      {
+        id: "in_2",
+        status: "paid",
+        amount_paid: 4900,
+        hosted_invoice_url: "https://invoice.stripe.test/in_2",
+        created: 1717200000,
+      },
+      {
+        id: "in_1",
+        status: "open",
+        amount_paid: 0,
+        hosted_invoice_url: null,
+        created: 1714521600,
+      },
+    ],
+  });
+  const stripe = {
+    invoices: { list: invoicesList },
+  } as unknown as import("./types").StripeLike;
+
+  const out = await listInvoices(stripe, db, "sp1");
+
+  // Stripe is queried scoped to the sponsor's customer, bounded to a small page.
+  const listArgs = invoicesList.mock.calls[0][0] as Record<string, unknown>;
+  expect(listArgs.customer).toBe("cus_existing");
+  expect(listArgs.limit).toBe(12);
+
+  expect(out).toEqual([
+    { id: "in_2", status: "paid", amountPaid: 4900, hostedUrl: "https://invoice.stripe.test/in_2", created: 1717200000 },
+    { id: "in_1", status: "open", amountPaid: 0, hostedUrl: null, created: 1714521600 },
+  ]);
+});
+
+test("listInvoices returns [] without calling Stripe when the sponsor has no customer", async () => {
+  const { db } = fakeDb({
+    id: "sp2",
+    name: "NoCust",
+    plan: "free",
+    seats: 0,
+    stripe_customer_id: null,
+    stripe_subscription_id: null,
+    subscription_status: "inactive",
+  });
+  const invoicesList = vi.fn();
+  const stripe = { invoices: { list: invoicesList } } as unknown as import("./types").StripeLike;
+
+  const out = await listInvoices(stripe, db, "sp2");
+
+  expect(out).toEqual([]);
+  expect(invoicesList).not.toHaveBeenCalled();
+});
