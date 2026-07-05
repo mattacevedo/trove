@@ -1,5 +1,6 @@
 "use server";
 
+import { createClient } from "@supabase/supabase-js";
 import { redirect } from "next/navigation";
 import { createServerClient } from "@/lib/supabase/server";
 import { requireUserId } from "@/lib/auth/require-user";
@@ -27,10 +28,30 @@ export async function acceptInvite(formData: FormData): Promise<void> {
   });
   if (error || !sponsorId) redirect(`/invite/${token}?error=1`);
 
-  // Keep the Stripe subscription quantity == active member count.
-  // syncSubscriptionSeats short-circuits (skipped:true) when the sponsor has no
-  // subscription yet, so this is safe to call on every accept.
-  await syncSubscriptionSeats(createStripeClient(), supabase, sponsorId as string);
+  // The RPC above already durably committed the membership. Everything from here is best-effort:
+  // seat sync must NEVER be able to turn a successful accept into a failure.
+  //
+  // It must run on a SERVICE-ROLE client, not the earner's RLS-scoped `supabase`: migration 0008
+  // revoked the authenticated role's UPDATE on sponsors except stripe_customer_id, so the
+  // unconditional sponsors.seats write inside syncSubscriptionSeats would hit Postgres 42501 under
+  // the earner's client. The earner's client is also wrong for the read side — cohort_members'
+  // earner-select RLS policy only exposes the caller's own row, so countActiveMembers would
+  // undercount every time. The service-role client bypasses RLS for both.
+  //
+  // It is also wrapped in try/catch: syncSubscriptionSeats makes a live Stripe call, and a Stripe
+  // outage (or any other failure here) must not lose an already-accepted membership. On failure we
+  // log and fall through to the same redirect; the webhook's subscription.updated handler is the
+  // durable backstop that reconciles seats later.
+  try {
+    const admin = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.SUPABASE_SERVICE_ROLE_KEY!,
+      { auth: { autoRefreshToken: false, persistSession: false } }
+    );
+    await syncSubscriptionSeats(createStripeClient(), admin, sponsorId as string);
+  } catch (syncError) {
+    console.error("[acceptInvite] seat sync failed (best-effort, membership already committed):", syncError);
+  }
 
   redirect("/app");
 }
