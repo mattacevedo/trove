@@ -1512,7 +1512,7 @@ export interface StripeLike {
   customers: { create(args: unknown): Promise<{ id: string }> };
   checkout: { sessions: { create(args: unknown): Promise<{ id: string; url: string | null }> } };
   billingPortal: { sessions: { create(args: unknown): Promise<{ url: string }> } };
-  subscriptions: { retrieve(id: string): Promise<{ id: string; status: string; items: { data: Array<{ id: string; quantity?: number }> } }>; update(id: string, args: unknown): Promise<{ id: string }>; };
+  subscriptions: { retrieve(id: string): Promise<{ id: string; status: string; items: { data: Array<{ id: string; quantity?: number; price?: { id: string } }> } }>; update(id: string, args: unknown): Promise<{ id: string }>; };
   invoices: { list(args: unknown): Promise<{ data: Array<{ id: string; status: string | null; amount_paid: number; hosted_invoice_url: string | null; created: number }> }> };
   webhooks: { constructEvent(payload: string | Buffer, sig: string, secret: string): { id: string; created: number; type: string; data: { object: Record<string, unknown> } }; };
 }
@@ -1641,7 +1641,7 @@ export function createPostmarkSender(opts?: { token?: string; fetchImpl?: typeof
       retrieve(id: string): Promise<{
         id: string;
         status: string;
-        items: { data: Array<{ id: string; quantity?: number }> };
+        items: { data: Array<{ id: string; quantity?: number; price?: { id: string } }> };
       }>;
       update(id: string, args: unknown): Promise<{ id: string }>;
     };
@@ -7111,7 +7111,7 @@ export async function POST(request: NextRequest): Promise<NextResponse>;
 
 Consumes:
 - `StripeLike.subscriptions.retrieve(id) / .update(id, args)` (Task 3, `lib/billing/types.ts`) — shape:
-  `subscriptions.retrieve(id): Promise<{ id: string; status: string; items: { data: Array<{ id: string; quantity?: number }> } }>`,
+  `subscriptions.retrieve(id): Promise<{ id: string; status: string; items: { data: Array<{ id: string; quantity?: number; price?: { id: string } }> } }>`,
   `subscriptions.update(id, args): Promise<{ id: string }>`.
 - `sponsors` billing cols (Task 1): `stripe_subscription_id text` (nullable).
 - `cohort_members` (existing 0002 schema) with `status` enum `invited|active|removed`.

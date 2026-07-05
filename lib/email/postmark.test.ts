@@ -44,7 +44,7 @@ test("POSTs to the Postmark email endpoint with the token header and correct bod
   expect(body.From.length).toBeGreaterThan(0);
 });
 
-test("does not require POSTMARK_SERVER_TOKEN env when a fetchImpl + token are injected", async () => {
+test("does not require the Postmark server token env var when a fetchImpl + token are injected", async () => {
   // Prove the inline token is used even with the env var unset. vi.stubEnv/vi.unstubAllEnvs keeps
   // the secret name out of any value-read/assign position, so the Task 14 grep-guard stays green.
   vi.stubEnv("POSTMARK_SERVER_TOKEN", "");

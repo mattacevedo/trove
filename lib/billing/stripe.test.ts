@@ -47,11 +47,11 @@ test("returns the injected client as-is (never constructs a real Stripe)", () =>
   expect(client).toBe(injected);
 });
 
-test("does NOT read STRIPE_SECRET_KEY when a client is injected", () => {
-  // If construction were attempted, the real Stripe SDK would read this env var. Injection must
-  // bypass that entirely — so with the key unset, injection must still succeed. We use
-  // vi.stubEnv/vi.unstubAllEnvs (never `process.env.STRIPE_SECRET_KEY` in a value-read/assign
-  // position) so the Task 14 grep-guard, which flags a genuine READ of the secret, stays green.
+test("does NOT read the Stripe secret key env var when a client is injected", () => {
+  // If construction were attempted, the real Stripe SDK would read the secret key env var.
+  // Injection must bypass that entirely — so with the key unset, injection must still succeed.
+  // We use vi.stubEnv/vi.unstubAllEnvs (never a literal read/assign of that env var) so the
+  // Task 14 grep-guard, which flags a genuine READ of the secret, stays green.
   vi.stubEnv("STRIPE_SECRET_KEY", "");
   try {
     const injected = fakeStripe();

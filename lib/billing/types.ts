@@ -76,7 +76,7 @@ export interface StripeLike {
     retrieve(id: string): Promise<{
       id: string;
       status: string;
-      items: { data: Array<{ id: string; quantity?: number }> };
+      items: { data: Array<{ id: string; quantity?: number; price?: { id: string } }> };
     }>;
     update(id: string, args: unknown): Promise<{ id: string }>;
   };
