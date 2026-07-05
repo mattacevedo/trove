@@ -11,6 +11,7 @@ import { createPostmarkSender } from "@/lib/email/postmark";
 import { createStripeClient } from "@/lib/billing/stripe";
 import { createCheckoutSession, SubscriptionAlreadyExistsError } from "@/lib/billing/checkout";
 import { countActiveMembers } from "@/lib/billing/seats";
+import { createPortalSession } from "@/lib/billing/portal";
 
 /**
  * Create a new sponsor organization for the current user via the create_sponsor RPC
@@ -76,12 +77,10 @@ export async function inviteCohort(formData: FormData): Promise<void> {
  * a later refactor.
  *
  * F13: if a subscription already exists (createCheckoutSession throws SubscriptionAlreadyExistsError,
- * including for past_due/incomplete), do NOT start a second one — route the admin to manage the
- * existing subscription instead of creating another. Task 11 (not yet landed on this branch) will add
- * an `openBillingPortal` action in this same module; until then this redirects to a `?manage=1` query
- * param on /sponsor/billing as an honest placeholder — swap to `return openBillingPortal(new
- * FormData())` once Task 11 lands. The final redirect(s) run OUTSIDE the try/catch (redirect throws a
- * control signal, so it must not be swallowed).
+ * including for past_due/incomplete), do NOT start a second one — route the admin to the Customer
+ * Portal (openBillingPortal, Task 11) to manage/fix the existing subscription instead of creating
+ * another. The final redirect(s) run OUTSIDE the try/catch (redirect throws a control signal, so it
+ * must not be swallowed); openBillingPortal itself redirects, so returning it here satisfies that.
  */
 export async function startCheckout(): Promise<void> {
   const { sponsorId } = await requireSponsorAdmin();
@@ -111,13 +110,28 @@ export async function startCheckout(): Promise<void> {
     checkoutUrl = url;
   } catch (err) {
     if (err instanceof SubscriptionAlreadyExistsError) {
-      // A subscription already exists — send the admin to manage/fix it instead of creating a
-      // second one. TODO(Task 11): swap for `return openBillingPortal(new FormData())` once that
-      // action lands in this module.
-      redirect("/sponsor/billing?manage=1");
+      // A subscription already exists — send the admin to manage/fix it in the Customer Portal
+      // instead of creating a second one (F13). openBillingPortal redirects itself.
+      return openBillingPortal(new FormData());
     }
     throw err;
   }
 
   redirect(checkoutUrl);
+}
+
+/**
+ * Open the Stripe Customer Portal for the current sponsor. Role-gated; resolves the app origin from
+ * the request headers so the portal returns the admin to /sponsor/billing. Injects a REAL Stripe
+ * client (createStripeClient) — tests mock this module, never construct a real client.
+ */
+export async function openBillingPortal(_formData: FormData): Promise<void> {
+  const { sponsorId } = await requireSponsorAdmin();
+  const supabase = await createServerClient();
+  const origin = (await headers()).get("origin") ?? "";
+  const { url } = await createPortalSession(createStripeClient(), supabase, {
+    sponsorId,
+    returnUrl: `${origin}/sponsor/billing`,
+  });
+  redirect(url);
 }
