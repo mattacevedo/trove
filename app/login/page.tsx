@@ -31,7 +31,9 @@ export default async function LoginPage({
           </div>
           {params.error ? (
             <p className="text-sm text-[var(--color-failed)]" role="alert">
-              Something went wrong. Please try again.
+              {params.error === "rate_limited"
+                ? "Too many sign-in emails in the past hour. Please wait a little while and try again."
+                : "Something went wrong. Please try again."}
             </p>
           ) : null}
           <Button type="submit" className="w-full">
