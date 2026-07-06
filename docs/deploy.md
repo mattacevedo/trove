@@ -58,6 +58,13 @@ request headers), so **no code changes** are needed to change domains. Three con
 1. Verify a sender domain/signature in Postmark.
 2. Set `POSTMARK_SERVER_TOKEN` in Vercel (prod), redeploy — enables cohort invite emails.
 3. The invite sender uses `https://api.postmarkapp.com/email` directly (no SDK).
+3a. **Free-tier restriction discovered 2026-07-06:** without custom SMTP, Supabase
+   rejects BOTH email-template customization AND rate-limit changes ("Email template
+   modification is not available for free tier projects using the default email
+   provider"). The default templates send PKCE `?code` links; `/auth/confirm` handles
+   both that flow and the `token_hash` flow, so sign-in emails WORK today — but the
+   `?code` link must be opened in the same browser that requested it, and the 2/hr cap
+   applies, until SMTP is configured.
 4. **Also configure Supabase Auth SMTP with the same Postmark account** (dashboard →
    Auth → SMTP, or Management API `PATCH /config/auth` with `smtp_host
    smtp.postmarkapp.com`, port 587, user AND pass = the Postmark server token, plus a
