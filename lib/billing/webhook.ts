@@ -25,14 +25,24 @@
 //     the local terminality guard above, a later 'updated' for that same (now-stale) subscription id
 //     cannot resurrect it — regardless of what its live retrieve reports.
 //   • Plan label comes from the stable PLAN_BY_PRICE_ID map (price.id), never price.nickname.
-//   • Seats are NOT written here — reconciliation (Task 13, syncSubscriptionSeats) is the SOLE
-//     writer of sponsors.seats.
+//   • Seats: sponsors.seats is written EXCLUSIVELY by syncSubscriptionSeats (lib/billing/seats.ts) —
+//     this module never writes the `seats` column directly. customer.subscription.updated calls
+//     syncSubscriptionSeats AFTER its own status/plan write (both the live-active write and the
+//     "not live" cleared-to-canceled write), reusing the same `stripe`/`db` already in scope, so
+//     seats self-heal on essentially any subscription mutation Stripe reports — including a manual
+//     quantity edit in the Stripe Dashboard/Portal that never went through our own invite/remove
+//     flows. It is NOT called on the stale/local-terminality-guard early return (the event is a no-op
+//     there) nor from customer.subscription.created/deleted (Tasks 6/13's app-level best-effort calls
+//     and the next updated event cover those transitions). The echo-loop guard lives inside
+//     syncSubscriptionSeats itself (skip the Stripe update when its quantity already matches), so
+//     calling it here on every updated event cannot create a webhook feedback loop.
 //   • Unknown customers: created/updated/invoice.* all resolve the sponsor row FIRST and return
 //     { handled: false } (no write, no throw) when the Stripe customer id matches no sponsor —
 //     consistent treatment across every branch that keys off stripe_customer_id.
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { createStripeClient, planForPriceId } from "@/lib/billing/stripe";
+import { syncSubscriptionSeats } from "@/lib/billing/seats";
 
 /** Narrow a loose JSON value to a non-empty string, or return null. */
 function asString(v: unknown): string | null {
@@ -167,6 +177,13 @@ export async function handleStripeEvent(
         stripe_subscription_id: subscriptionId,
         plan: planForPriceId(livePriceId),
       });
+
+      // Reconcile seats now that we've confirmed the live status/plan. Stripe fires 'updated' on
+      // essentially any subscription mutation (quantity changes included), so this keeps
+      // sponsors.seats and the Stripe item quantity in lockstep even when neither drifted via our
+      // own invite/remove flows. syncSubscriptionSeats' own echo-guard (skip the Stripe update when
+      // its quantity already matches) is what prevents this from looping.
+      await syncSubscriptionSeats(stripe, db, sponsor.id);
       return { handled: true };
     }
 

@@ -38,7 +38,12 @@ export async function countActiveMembers(
  *   update (and another webhook) forever. Only when they differ do we update with create_prorations.
  *
  * Called on every membership change: invite-accept (Task 6), member-remove (Task 13's
- * app/sponsor action), and reconciled inside handleStripeEvent for customer.subscription.updated.
+ * app/sponsor action) — both best-effort — AND, as a genuinely active safety net rather than an
+ * aspirational one, from inside handleStripeEvent (lib/billing/webhook.ts) on every
+ * customer.subscription.updated event it processes. Stripe fires 'updated' on essentially any
+ * subscription mutation (including a quantity change made outside our own flows, e.g. a manual edit
+ * in the Stripe Dashboard or the Customer Portal), so this call site alone keeps seats self-healing
+ * even if the local best-effort calls above fail outright.
  */
 export async function syncSubscriptionSeats(
   stripe: StripeLike,

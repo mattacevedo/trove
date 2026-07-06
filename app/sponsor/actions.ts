@@ -157,7 +157,11 @@ export async function openBillingPortal(_formData: FormData): Promise<void> {
  *
  * Seat sync runs on the same service-role client afterward (mirrors the accept-flow pattern) and is
  * best-effort: wrapped in try/catch so a Stripe hiccup can never turn a successful removal into a
- * failure. The webhook's subscription.updated reconciliation is the durable backstop.
+ * failure. This is safe because the webhook's customer.subscription.updated handler also calls
+ * syncSubscriptionSeats on every update it processes — a genuinely operative backstop: Stripe fires
+ * 'updated' on essentially any subscription mutation, so a dropped call here still self-heals the
+ * next time Stripe reports on the subscription (e.g. from the quantity change this removal itself
+ * would trigger once retried, or any other edit).
  */
 export async function removeMember(formData: FormData): Promise<void> {
   const { sponsorId } = await requireSponsorAdmin();

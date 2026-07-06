@@ -40,8 +40,12 @@ export async function acceptInvite(formData: FormData): Promise<void> {
   //
   // It is also wrapped in try/catch: syncSubscriptionSeats makes a live Stripe call, and a Stripe
   // outage (or any other failure here) must not lose an already-accepted membership. On failure we
-  // log and fall through to the same redirect; the webhook's subscription.updated handler is the
-  // durable backstop that reconciles seats later.
+  // log and fall through to the same redirect. This is safe because the webhook's
+  // customer.subscription.updated handler ALSO calls syncSubscriptionSeats on every update it
+  // processes (lib/billing/webhook.ts) — a genuinely operative backstop, not a hypothetical one:
+  // Stripe fires 'updated' on essentially any subscription mutation, including a quantity edit made
+  // outside this flow entirely (the Stripe Dashboard, the Customer Portal), so seats self-heal even
+  // when this best-effort call fails outright.
   try {
     const admin = createServiceRoleClient();
     await syncSubscriptionSeats(createStripeClient(), admin, sponsorId as string);

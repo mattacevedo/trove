@@ -270,6 +270,72 @@ test("F2: customer.subscription.updated falls back to the event payload's price 
   expect(stripeFake.planForPriceIdCalls).toContain("price_live_team"); // fell back to the event's price id
 });
 
+test("CAUSE A: customer.subscription.updated (live-active path) reconciles seats via syncSubscriptionSeats", async () => {
+  // The live subscription's item quantity (1) does not match the sponsor's active cohort_members
+  // count (3) -> the webhook's post-write reconcile must recompute and push the new quantity to
+  // Stripe (via subscriptions.update) AND persist sponsors.seats, exactly like syncSubscriptionSeats
+  // would if called directly with these inputs.
+  stripeFake.subRetrieve = vi.fn(async (id: string) => ({
+    id,
+    status: "active",
+    items: { data: [{ id: "si_live", quantity: 1, price: { id: "price_x" } }] },
+  }));
+  subRetrieve = stripeFake.subRetrieve;
+  const { client, updates } = fakeDb({
+    sponsorRow: { id: "sp_1", stripe_subscription_id: "sub_123" },
+    activeCount: 3,
+  });
+  const out = await handleStripeEvent(client, {
+    id: "evt_updated_seats_reconcile",
+    type: "customer.subscription.updated",
+    data: {
+      object: {
+        id: "sub_123",
+        customer: "cus_abc",
+        status: "active",
+        items: { data: [{ price: { id: "price_x" } }] },
+      },
+    },
+  });
+  expect(out).toEqual({ handled: true });
+
+  // subscriptions.update was called with the recomputed quantity (3), keyed to the live item id.
+  expect(subUpdate).toHaveBeenCalledWith("sub_123", {
+    items: [{ id: "si_live", quantity: 3 }],
+    proration_behavior: "create_prorations",
+  });
+
+  // sponsors.seats was written (the seats-reconcile update), in addition to the status/plan write.
+  const seatsWrite = updates.find(
+    (u) => u.table === "sponsors" && Object.prototype.hasOwnProperty.call(u.values, "seats")
+  );
+  expect(seatsWrite).toBeDefined();
+  expect(seatsWrite!.values).toMatchObject({ seats: 3 });
+});
+
+test("CAUSE A regression: the STALE-guard path (mismatched sub id) does NOT reconcile seats or touch the sponsor row at all", async () => {
+  const { client, updates } = fakeDb({
+    sponsorRow: { id: "sp_1", stripe_subscription_id: "sub_CURRENT" },
+    activeCount: 5,
+  });
+  const out = await handleStripeEvent(client, {
+    id: "evt_updated_stale_guard_no_seats",
+    type: "customer.subscription.updated",
+    data: {
+      object: {
+        id: "sub_OLD", // does not match sponsor.stripe_subscription_id ("sub_CURRENT")
+        customer: "cus_abc",
+        status: "active",
+        items: { data: [{ price: { id: "price_x" } }] },
+      },
+    },
+  });
+  expect(out).toEqual({ handled: false });
+  expect(updates).toHaveLength(0);
+  expect(subRetrieve).not.toHaveBeenCalled();
+  expect(subUpdate).not.toHaveBeenCalled();
+});
+
 test("customer.subscription.deleted marks the sponsor canceled and clears the subscription id", async () => {
   const { client, updates } = fakeDb();
   const out = await handleStripeEvent(client, {
@@ -309,9 +375,12 @@ test("a stale customer.subscription.updated after deletion does NOT re-activate 
  * A stateful fake db (unlike `fakeDb`, whose sponsors row is a static snapshot): the sponsors
  * `select` reflects whatever the LAST `update` wrote, so a sequence of handleStripeEvent calls can
  * be driven against it and each subsequent read sees prior writes — needed to reproduce the
- * resurrection-ordering hole (deleted -> stale updated for the SAME old sub id).
+ * resurrection-ordering hole (deleted -> stale updated for the SAME old sub id). Also supports the
+ * cohort_members head-count query (CAUSE A: syncSubscriptionSeats runs inside the live-active
+ * updated-branch write path now), defaulting to 0 active members — harmless for tests that don't
+ * care about the seats reconcile's exact quantity.
  */
-function statefulFakeDb(initialRow: Record<string, unknown>) {
+function statefulFakeDb(initialRow: Record<string, unknown>, opts?: { activeCount?: number }) {
   const updates: Array<{ table: string; values: Record<string, unknown>; eqCol: string; eqVal: unknown }> = [];
   const seenEvents = new Set<string>();
   let sponsorRow: Record<string, unknown> | null = { ...initialRow };
@@ -328,6 +397,14 @@ function statefulFakeDb(initialRow: Record<string, unknown>) {
             return Promise.resolve({ error: null });
           },
         };
+      }
+      if (table === "cohort_members") {
+        const c: Record<string, unknown> = {};
+        c.select = () => c;
+        c.eq = () => c;
+        c.then = (res: (v: { count: number; error: null }) => void) =>
+          res({ count: opts?.activeCount ?? 0, error: null });
+        return c;
       }
       // sponsors
       return {
