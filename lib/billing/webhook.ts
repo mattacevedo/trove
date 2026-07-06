@@ -46,6 +46,12 @@
 //   • Unknown customers: created/updated/invoice.* all resolve the sponsor row FIRST and return
 //     { handled: false } (no write, no throw) when the Stripe customer id matches no sponsor —
 //     consistent treatment across every branch that keys off stripe_customer_id.
+//   • Second-subscription adoption guard: customer.subscription.created refuses to overwrite a
+//     sponsor's EXISTING, DIFFERENT stripe_subscription_id — silently adopting a second concurrent
+//     subscription would orphan one of them with no further reconciliation. It logs loudly
+//     (console.error, greppable "REFUSING to adopt second subscription") and returns
+//     { handled: false } with no write. Re-activation after a prior deletion (the sponsor's current
+//     id is null) and idempotent re-delivery of the SAME subscription id both still write normally.
 //   • Ledger-loses-failed-events safety: recordEvent inserts event.id BEFORE any side effects run,
 //     so if the dispatch switch throws AFTER that insert succeeds (a live Stripe read fails, a DB
 //     write fails, etc.), the ledger would otherwise say "seen" for an event we never actually
@@ -160,6 +166,23 @@ async function dispatch(
       // error (e.g. test-mode noise, a customer created outside our flow) — handled:false, no write.
       const sponsor = await sponsorForCustomer(db, customerId);
       if (!sponsor) return { handled: false };
+
+      // Refuse to silently adopt a SECOND concurrent subscription: if the sponsor already has a
+      // non-null stripe_subscription_id that differs from this event's, overwriting it would orphan
+      // whichever subscription loses the race — a billing correctness bug (double-charging risk,
+      // and the orphaned subscription would never be reconciled again). Re-activation after a prior
+      // deletion (sponsor.stripeSubscriptionId is null) and idempotent re-delivery of the SAME
+      // subscription id both still proceed normally below.
+      if (
+        sponsor.stripeSubscriptionId !== null &&
+        sponsor.stripeSubscriptionId !== subscriptionId
+      ) {
+        console.error(
+          `[handleStripeEvent] REFUSING to adopt second subscription for sponsor ${sponsor.id}: ` +
+            `existing=${sponsor.stripeSubscriptionId} new=${subscriptionId}`
+        );
+        return { handled: false };
+      }
 
       const values: Record<string, unknown> = {
         subscription_status: status,

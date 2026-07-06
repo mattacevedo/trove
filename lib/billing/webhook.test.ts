@@ -181,6 +181,60 @@ test("F3: customer.subscription.created for an unknown customer is handled:false
   expect(updates).toHaveLength(0);
 });
 
+test("CAUSE E: customer.subscription.created REFUSES to adopt a second concurrent subscription", async () => {
+  // The sponsor already has an ACTIVE, DIFFERENT subscription (sub_A). A 'created' event for a
+  // second subscription (sub_B) must not silently overwrite it — that would orphan/adopt a second
+  // concurrent subscription, a billing correctness bug.
+  const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+  const { client, updates } = fakeDb({ sponsorRow: { id: "sp_1", stripe_subscription_id: "sub_A" } });
+  const out = await handleStripeEvent(client, {
+    id: "evt_created_second_sub",
+    type: "customer.subscription.created",
+    data: {
+      object: {
+        id: "sub_B",
+        customer: "cus_abc",
+        status: "active",
+        items: { data: [{ price: { id: "price_x" } }] },
+      },
+    },
+  });
+  expect(out).toEqual({ handled: false });
+  expect(updates).toHaveLength(0); // no write — the existing subscription id is untouched
+
+  // Loudly, greppably logged so this is discoverable in production logs/alerts.
+  expect(consoleError).toHaveBeenCalledWith(
+    expect.stringContaining("[handleStripeEvent] REFUSING to adopt second subscription")
+  );
+  const loggedMessage = consoleError.mock.calls[0][0] as string;
+  expect(loggedMessage).toContain("sp_1");
+  expect(loggedMessage).toContain("sub_A");
+  expect(loggedMessage).toContain("sub_B");
+  consoleError.mockRestore();
+});
+
+test("CAUSE E: customer.subscription.created for the SAME subscription id as already on file still writes normally (idempotent re-delivery)", async () => {
+  const { client, updates } = fakeDb({ sponsorRow: { id: "sp_1", stripe_subscription_id: "sub_A" } });
+  const out = await handleStripeEvent(client, {
+    id: "evt_created_same_sub",
+    type: "customer.subscription.created",
+    data: {
+      object: {
+        id: "sub_A",
+        customer: "cus_abc",
+        status: "active",
+        items: { data: [{ price: { id: "price_x" } }] },
+      },
+    },
+  });
+  expect(out).toEqual({ handled: true });
+  expect(updates).toHaveLength(1);
+  expect(updates[0].values).toMatchObject({
+    subscription_status: "active",
+    stripe_subscription_id: "sub_A",
+  });
+});
+
 test("customer.subscription.updated writes the LIVE status, not the (stale) event payload", async () => {
   // Event payload SAYS active, but the live subscription is past_due — live must win.
   // Reassign on stripeFake (the object the mock factory reads), not just the local alias.
