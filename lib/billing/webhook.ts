@@ -39,10 +39,28 @@
 //   • Unknown customers: created/updated/invoice.* all resolve the sponsor row FIRST and return
 //     { handled: false } (no write, no throw) when the Stripe customer id matches no sponsor —
 //     consistent treatment across every branch that keys off stripe_customer_id.
+//   • Ledger-loses-failed-events safety: recordEvent inserts event.id BEFORE any side effects run,
+//     so if the dispatch switch throws AFTER that insert succeeds (a live Stripe read fails, a DB
+//     write fails, etc.), the ledger would otherwise say "seen" for an event we never actually
+//     applied — Stripe's automatic retry would then hit 23505, get handled:true, and the side
+//     effects would be PERMANENTLY lost. The dispatch is wrapped in try/catch: on any thrown error we
+//     best-effort DELETE the stripe_events row for that event id (swallowing errors from the delete
+//     itself — it must never mask the original error) and then RE-THROW, so the route handler still
+//     500s (Stripe retries the delivery) and the retry is processed as fresh, since the ledger row is
+//     gone.
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { createStripeClient, planForPriceId } from "@/lib/billing/stripe";
 import { syncSubscriptionSeats } from "@/lib/billing/seats";
+
+/** Best-effort remove an event id from the idempotency ledger; never throws. */
+async function forgetEvent(db: SupabaseClient, eventId: string): Promise<void> {
+  try {
+    await db.from("stripe_events").delete().eq("id", eventId);
+  } catch {
+    // Cleanup is best-effort — swallow so it can never mask the original dispatch error.
+  }
+}
 
 /** Narrow a loose JSON value to a non-empty string, or return null. */
 function asString(v: unknown): string | null {
@@ -108,6 +126,22 @@ export async function handleStripeEvent(
     if (!isNew) return { handled: true };
   }
 
+  try {
+    return await dispatch(db, event, object);
+  } catch (err) {
+    // The ledger already says "seen" for this event id, but we never actually finished applying its
+    // side effects — forget it so a Stripe retry (triggered by re-throwing below, which makes the
+    // route handler 500) is processed as a brand-new event instead of short-circuiting on 23505.
+    if (eventId) await forgetEvent(db, eventId);
+    throw err;
+  }
+}
+
+async function dispatch(
+  db: SupabaseClient,
+  event: { id: string; type: string; data: { object: Record<string, unknown> } },
+  object: Record<string, unknown>
+): Promise<{ handled: boolean }> {
   switch (event.type) {
     case "customer.subscription.created": {
       const customerId = asString(object.customer);

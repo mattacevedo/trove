@@ -623,7 +623,12 @@ test("an updated event whose customer maps to no sponsor is ignored", async () =
 test("throws when the sponsors update returns a PostgREST error", async () => {
   const client = {
     from(table: string) {
-      if (table === "stripe_events") return { insert: () => Promise.resolve({ error: null }) };
+      if (table === "stripe_events") {
+        return {
+          insert: () => Promise.resolve({ error: null }),
+          delete: () => ({ eq: () => Promise.resolve({ error: null }) }),
+        };
+      }
       return {
         select() {
           return { eq() { return { maybeSingle: async () => ({ data: { id: "sp_1", stripe_subscription_id: "sub_123" }, error: null }) }; } };
@@ -641,4 +646,177 @@ test("throws when the sponsors update returns a PostgREST error", async () => {
       data: { object: { customer: "cus_abc", subscription: "sub_123", billing_reason: "subscription_cycle" } },
     })
   ).rejects.toThrow(/boom/);
+});
+
+/**
+ * CAUSE C: recordEvent inserts event.id into stripe_events BEFORE any side effects run. If dispatch
+ * throws AFTER that insert succeeds, Stripe's retry would re-deliver the same event, recordEvent
+ * would hit 23505 (already seen), return handled:true, and the side effects would be PERMANENTLY
+ * lost. The fix: on any thrown dispatch error, best-effort DELETE the stripe_events row for that
+ * event id, then re-throw — so the caller still 500s (Stripe retries) and the retry is processed as
+ * fresh (the ledger row is gone).
+ *
+ * This fake models a mutable stripe_events ledger (insert/delete truly mutate a Set, unlike the other
+ * fakes in this file) plus a `sponsors` table whose update() can be toggled to fail once via
+ * `failNextSponsorsUpdate`, so the SAME event id can be redelivered and this time succeed.
+ */
+function causeCFakeDb() {
+  const events = new Set<string>();
+  const deletedEventIds: string[] = [];
+  let failNextSponsorsUpdate = false;
+  const sponsorsUpdates: Array<Record<string, unknown>> = [];
+
+  const client = {
+    from(table: string) {
+      if (table === "stripe_events") {
+        return {
+          insert(row: { id: string }) {
+            if (events.has(row.id)) {
+              return Promise.resolve({ error: { code: "23505", message: "duplicate key" } });
+            }
+            events.add(row.id);
+            return Promise.resolve({ error: null });
+          },
+          delete() {
+            return {
+              eq(_col: string, val: string) {
+                events.delete(val);
+                deletedEventIds.push(val);
+                return Promise.resolve({ error: null });
+              },
+            };
+          },
+        };
+      }
+      if (table === "cohort_members") {
+        const c: Record<string, unknown> = {};
+        c.select = () => c;
+        c.eq = () => c;
+        c.then = (res: (v: { count: number; error: null }) => void) => res({ count: 0, error: null });
+        return c;
+      }
+      // sponsors
+      return {
+        select() {
+          return {
+            eq() {
+              return {
+                maybeSingle: async () => ({
+                  data: { id: "sp_1", stripe_subscription_id: "sub_123" },
+                  error: null,
+                }),
+              };
+            },
+          };
+        },
+        update(values: Record<string, unknown>) {
+          return {
+            eq() {
+              if (failNextSponsorsUpdate) {
+                failNextSponsorsUpdate = false;
+                return Promise.resolve({ error: { message: "simulated live DB failure" } });
+              }
+              sponsorsUpdates.push(values);
+              return Promise.resolve({ error: null });
+            },
+          };
+        },
+      };
+    },
+  } as unknown as SupabaseClient;
+
+  return {
+    client,
+    deletedEventIds,
+    sponsorsUpdates,
+    setFailNextSponsorsUpdate: (v: boolean) => {
+      failNextSponsorsUpdate = v;
+    },
+    hasEvent: (id: string) => events.has(id),
+  };
+}
+
+test("CAUSE C: a thrown error mid-dispatch deletes the stripe_events row so a retry is processed fresh", async () => {
+  const db = causeCFakeDb();
+  db.setFailNextSponsorsUpdate(true);
+
+  const event = {
+    id: "evt_partial_failure",
+    type: "customer.subscription.deleted",
+    data: { object: { id: "sub_123", customer: "cus_abc", status: "canceled", items: { data: [] } } },
+  };
+
+  // First delivery: recordEvent's insert succeeds, then the sponsors update throws.
+  await expect(handleStripeEvent(db.client, event)).rejects.toThrow(/simulated live DB failure/);
+
+  // The ledger row was removed (best-effort cleanup) so the event is no longer "seen".
+  expect(db.hasEvent("evt_partial_failure")).toBe(false);
+  expect(db.deletedEventIds).toContain("evt_partial_failure");
+  expect(db.sponsorsUpdates).toHaveLength(0); // the failed write never landed
+
+  // Second delivery of the SAME event (Stripe's retry): recordEvent's insert succeeds again (no
+  // 23505, since the row was deleted), and this time the write succeeds -> side effects applied.
+  const retryOut = await handleStripeEvent(db.client, event);
+  expect(retryOut).toEqual({ handled: true });
+  expect(db.sponsorsUpdates).toHaveLength(1);
+  expect(db.sponsorsUpdates[0]).toMatchObject({
+    subscription_status: "canceled",
+    stripe_subscription_id: null,
+  });
+});
+
+test("CAUSE C: a delete failure during cleanup is swallowed and the ORIGINAL error still propagates", async () => {
+  const events = new Set<string>(["evt_delete_fails"]);
+  const client = {
+    from(table: string) {
+      if (table === "stripe_events") {
+        return {
+          insert(row: { id: string }) {
+            if (events.has(row.id)) {
+              return Promise.resolve({ error: { code: "23505", message: "duplicate key" } });
+            }
+            events.add(row.id);
+            return Promise.resolve({ error: null });
+          },
+          delete() {
+            return {
+              eq() {
+                // The cleanup delete itself fails — must be swallowed, not surfaced.
+                return Promise.resolve({ error: { message: "delete boom" } });
+              },
+            };
+          },
+        };
+      }
+      // sponsors: update throws to trigger the catch/cleanup path.
+      return {
+        select() {
+          return {
+            eq() {
+              return {
+                maybeSingle: async () => ({
+                  data: { id: "sp_1", stripe_subscription_id: "sub_123" },
+                  error: null,
+                }),
+              };
+            },
+          };
+        },
+        update() {
+          return { eq: () => Promise.resolve({ error: { message: "original failure" } }) };
+        },
+      };
+    },
+  } as unknown as SupabaseClient;
+
+  // Reset so recordEvent's insert succeeds fresh for this test's event id.
+  events.delete("evt_delete_fails");
+
+  await expect(
+    handleStripeEvent(client, {
+      id: "evt_delete_fails",
+      type: "customer.subscription.deleted",
+      data: { object: { id: "sub_123", customer: "cus_abc", status: "canceled", items: { data: [] } } },
+    })
+  ).rejects.toThrow(/original failure/); // NOT "delete boom" — the original error wins
 });
