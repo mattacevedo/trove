@@ -12,18 +12,19 @@ export default async function InvitePage({
   const { token } = await params;
   const { error } = await searchParams;
 
-  // Narrow pre-accept read: resolve the sponsor's name for a friendly prompt.
-  // A missing/accepted invite yields no usable name -> "no longer valid".
+  // Narrow pre-accept preview via the invite_preview SECURITY DEFINER RPC (0009), NOT a direct
+  // cohort_invites SELECT: the only RLS policy on cohort_invites (cohort_invites_sponsor_all, 0007)
+  // is sponsor-admin-scoped, so a real invitee — unauthenticated or authenticated but not that
+  // sponsor's admin — would get zero rows back and always see "Invitation unavailable". The RPC
+  // works identically for anon and authenticated callers and returns only the two fields this
+  // pre-login preview needs, keyed by the (unguessable) token itself. It returns an array of 0 or 1
+  // rows: empty for an unknown/garbage token, never an error.
   const supabase = await createServerClient();
-  const { data: invite } = await supabase
-    .from("cohort_invites")
-    .select("accepted_at, sponsors(name)")
-    .eq("token", token)
-    .maybeSingle();
+  const { data: rows } = await supabase.rpc("invite_preview", { invite_token: token });
+  const preview = (rows as Array<{ sponsor_name: string; is_open: boolean }> | null)?.[0];
 
-  const sponsor = invite?.sponsors as { name: string } | { name: string }[] | null | undefined;
-  const sponsorName = Array.isArray(sponsor) ? sponsor[0]?.name : sponsor?.name;
-  const isOpen = !!invite && !invite.accepted_at && !!sponsorName;
+  const sponsorName = preview?.sponsor_name;
+  const isOpen = !!preview && preview.is_open && !!sponsorName;
 
   return (
     <main className="mx-auto max-w-md px-4 py-16">
