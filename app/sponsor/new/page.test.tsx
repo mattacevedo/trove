@@ -5,8 +5,13 @@ vi.mock("@/app/sponsor/actions", () => ({ createSponsor: vi.fn() }));
 
 import SponsorNewPage from "./page";
 
-test("renders a labeled org-name input and an accent Create CTA wired to the action", () => {
-  render(<SponsorNewPage />);
+function sp(params: Record<string, string> = {}) {
+  return Promise.resolve(params);
+}
+
+test("renders a labeled org-name input and an accent Create CTA wired to the action", async () => {
+  const ui = await SponsorNewPage({ searchParams: sp() });
+  render(ui);
 
   // Heading present.
   expect(
@@ -25,4 +30,21 @@ test("renders a labeled org-name input and an accent Create CTA wired to the act
   // The form's action is the mocked server action (a function reference).
   const form = input.closest("form");
   expect(form).not.toBeNull();
+
+  // No error alert by default.
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+
+// ---- CAUSE H: swallowed action feedback ----
+
+test("CAUSE H: ?error=name_required renders an accessible alert", async () => {
+  const ui = await SponsorNewPage({ searchParams: sp({ error: "name_required" }) });
+  render(ui);
+  expect(screen.getByRole("alert")).toHaveTextContent(/name/i);
+});
+
+test("CAUSE H: ?error=create_failed renders an accessible alert", async () => {
+  const ui = await SponsorNewPage({ searchParams: sp({ error: "create_failed" }) });
+  render(ui);
+  expect(screen.getByRole("alert")).toBeInTheDocument();
 });

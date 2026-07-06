@@ -33,7 +33,12 @@ beforeEach(() => {
     from: () => ({ select: () => ({ eq: () => ({ single: async () => ({ data: { name: "Acme" } }) }) }) }),
   });
   createPostmarkSender.mockReturnValue({ send: vi.fn() });
-  inviteCohortLib.mockResolvedValue({ invited: [{ email: "a@x.com" }], skipped: [] });
+  inviteCohortLib.mockResolvedValue({
+    invited: [{ email: "a@x.com" }],
+    skipped: [],
+    resent: [],
+    failed: [],
+  });
   headers.mockResolvedValue(new Map([["origin", "https://trove.test"]]));
 });
 
@@ -54,6 +59,32 @@ test("parses the emails textarea, resolves origin from headers, and delegates to
   expect(callArgs.emails).toEqual(["a@x.com", "b@x.com"]); // invalid "bad" dropped
   expect(callArgs.origin).toBe("https://trove.test");
   expect(revalidatePath).toHaveBeenCalledWith("/sponsor/cohort");
+});
+
+// CAUSE H: the redirect target after a successful send now carries the lib's result counts so the
+// cohort page can render "3 invited, 1 skipped..." instead of a bare, silent redirect.
+test("CAUSE H: redirects with invited/skipped/resent/failed counts from the lib result", async () => {
+  inviteCohortLib.mockResolvedValue({
+    invited: [{ email: "a@x.com" }, { email: "b@x.com" }],
+    skipped: ["skip@x.com"],
+    resent: ["resend@x.com"],
+    failed: ["fail@x.com"],
+  });
+  await expect(inviteCohortAction(fd({ emails: "a@x.com, b@x.com" }))).rejects.toThrow(
+    "REDIRECT:/sponsor/cohort?invited=2&skipped=1&resent=1&failed=1"
+  );
+});
+
+test("CAUSE H: a batch with zero of a bucket still reports 0 explicitly (no silent omission)", async () => {
+  inviteCohortLib.mockResolvedValue({
+    invited: [{ email: "a@x.com" }],
+    skipped: [],
+    resent: [],
+    failed: [],
+  });
+  await expect(inviteCohortAction(fd({ emails: "a@x.com" }))).rejects.toThrow(
+    "REDIRECT:/sponsor/cohort?invited=1&skipped=0&resent=0&failed=0"
+  );
 });
 
 test("redirects with an error and does not call lib when no valid emails are supplied", async () => {

@@ -21,8 +21,13 @@ function formatDate(unixSeconds: number): string {
     : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 }
 
-export default async function BillingPage() {
+export default async function BillingPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ checkout?: string; error?: string }>;
+}) {
   const { sponsorId } = await requireSponsorAdmin();
+  const { checkout, error } = await searchParams;
   const supabase = await createServerClient();
 
   const { data: row } = await supabase
@@ -31,18 +36,32 @@ export default async function BillingPage() {
     .eq("id", sponsorId)
     .single();
 
+  const stripeCustomerId = (row?.stripe_customer_id as string | null) ?? null;
   const summary: BillingSummary = {
     plan: (row?.plan as string | null) ?? "free",
     subscriptionStatus: (row?.subscription_status as string | null) ?? "inactive",
     seats: (row?.seats as number | null) ?? 0,
-    stripeCustomerId: (row?.stripe_customer_id as string | null) ?? null,
+    stripeCustomerId,
   };
 
   // F13: the Checkout CTA appears ONLY when there is NO subscription at all. A subscription that
   // exists but is not active (past_due/incomplete) must route to the Portal to FIX payment, never
   // start a second subscription — so the button choice keys on stripe_subscription_id, not status.
   const hasSubscription = ((row?.stripe_subscription_id as string | null) ?? null) !== null;
-  const invoices = await listInvoices(createStripeClient(), supabase, sponsorId);
+
+  // CAUSE H: Stripe redirects the admin back to ?checkout=success as soon as Checkout completes, but
+  // the webhook that actually populates stripe_subscription_id (customer.subscription.created) can
+  // land moments later — a real race, not a hypothetical one. Showing the normal Checkout CTA in that
+  // window would let the admin start a SECOND subscription; showing nothing would look like the
+  // payment silently vanished. Render an explicit "activating" message and suppress the CTA instead.
+  const activating = checkout === "success" && !hasSubscription;
+
+  // CAUSE I: only construct a Stripe client / call listInvoices when the sponsor actually has a
+  // Stripe customer — createStripeClient() throws (`new Stripe("")`) when STRIPE_SECRET_KEY is unset,
+  // and a sponsor with no stripe_customer_id has no invoices to list regardless.
+  const invoices = stripeCustomerId
+    ? await listInvoices(createStripeClient(), supabase, sponsorId)
+    : [];
 
   return (
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 p-4">
@@ -52,6 +71,25 @@ export default async function BillingPage() {
           Your subscription bills per active seat. Manage payment details in the Stripe portal.
         </p>
       </header>
+
+      {activating ? (
+        <p
+          role="status"
+          className="rounded-lg border border-foreground/15 bg-white p-4 text-sm text-foreground/80"
+        >
+          Payment received — activating your subscription…
+        </p>
+      ) : null}
+      {checkout === "cancel" ? (
+        <p className="rounded-lg border border-foreground/15 bg-white p-4 text-sm" role="alert">
+          Checkout was canceled — no changes were made to your subscription.
+        </p>
+      ) : null}
+      {error === "price_not_configured" ? (
+        <p className="rounded-lg border border-foreground/15 bg-white p-4 text-sm" role="alert">
+          Billing isn&apos;t configured yet. Please contact support.
+        </p>
+      ) : null}
 
       <section
         aria-label="Subscription summary"
@@ -79,7 +117,7 @@ export default async function BillingPage() {
           <form action={openBillingPortal}>
             <Button type="submit">Manage billing</Button>
           </form>
-        ) : (
+        ) : activating ? null : (
           <form action={startCheckout}>
             <Button type="submit">Start subscription</Button>
           </form>

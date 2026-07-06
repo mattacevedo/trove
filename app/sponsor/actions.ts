@@ -33,6 +33,12 @@ export async function createSponsor(formData: FormData): Promise<void> {
  * Invite a cohort by email. Parses the 'emails' textarea, resolves the request origin so the
  * emailed link is absolute, and delegates to lib inviteCohort with the REAL Postmark sender
  * (constructed only here). The sponsor is resolved via requireSponsorAdmin (role-gate).
+ *
+ * CAUSE H: the lib call's result (invited/skipped/resent/failed counts — see lib/cohort/invite.ts)
+ * is threaded through the redirect as query params instead of being silently discarded, so
+ * app/sponsor/cohort/page.tsx can render what actually happened ("2 invited, 1 already a member").
+ * All four counts are always present (even when 0) so the page never has to guess whether a bucket
+ * was omitted vs. genuinely empty.
  */
 export async function inviteCohort(formData: FormData): Promise<void> {
   const { sponsorId } = await requireSponsorAdmin();
@@ -52,7 +58,7 @@ export async function inviteCohort(formData: FormData): Promise<void> {
   const host = hdrs.get("host");
   const origin = hdrs.get("origin") ?? (host ? `https://${host}` : "");
 
-  await inviteCohortLib(supabase, createPostmarkSender(), {
+  const result = await inviteCohortLib(supabase, createPostmarkSender(), {
     sponsorId,
     sponsorName,
     emails: valid,
@@ -60,7 +66,13 @@ export async function inviteCohort(formData: FormData): Promise<void> {
   });
 
   revalidatePath("/sponsor/cohort");
-  redirect("/sponsor/cohort");
+  const counts = new URLSearchParams({
+    invited: String(result.invited.length),
+    skipped: String(result.skipped.length),
+    resent: String(result.resent.length),
+    failed: String(result.failed.length),
+  });
+  redirect(`/sponsor/cohort?${counts.toString()}`);
 }
 
 /**
