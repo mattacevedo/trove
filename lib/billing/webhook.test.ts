@@ -644,44 +644,104 @@ test("a duplicate event id is applied only once (idempotency via stripe_events)"
   expect(updates).toHaveLength(1);
 });
 
-test("invoice.paid/payment_failed act only when billing_reason + subscription correlate", async () => {
-  // (a) correlated cycle invoice for the sponsor's current sub -> active.
+test("invoice.paid/payment_failed act only when billing_reason + subscription correlate (CAUSE G: basil shape)", async () => {
+  // Under apiVersion 2025-06-30.basil, Invoice.subscription is gone — the subscription id lives at
+  // parent.subscription_details.subscription. (a) correlated cycle invoice, basil shape -> active.
   const paid = fakeDb({ sponsorRow: { id: "sp_1", stripe_subscription_id: "sub_123" } });
   await handleStripeEvent(paid.client, {
     id: "evt_inv_paid",
     type: "invoice.paid",
-    data: { object: { customer: "cus_abc", subscription: "sub_123", billing_reason: "subscription_cycle" } },
+    data: {
+      object: {
+        customer: "cus_abc",
+        billing_reason: "subscription_cycle",
+        parent: { subscription_details: { subscription: "sub_123" } },
+      },
+    },
   });
   expect(paid.updates[0].values).toMatchObject({ subscription_status: "active" });
 
-  // (b) correlated failure -> past_due.
+  // (b) correlated failure, basil shape -> past_due.
   const failed = fakeDb({ sponsorRow: { id: "sp_1", stripe_subscription_id: "sub_123" } });
   await handleStripeEvent(failed.client, {
     id: "evt_inv_failed",
     type: "invoice.payment_failed",
-    data: { object: { customer: "cus_abc", subscription: "sub_123", billing_reason: "subscription_cycle" } },
+    data: {
+      object: {
+        customer: "cus_abc",
+        billing_reason: "subscription_cycle",
+        parent: { subscription_details: { subscription: "sub_123" } },
+      },
+    },
   });
   expect(failed.updates[0].values).toMatchObject({ subscription_status: "past_due" });
 
-  // (c) a non-subscription billing_reason is ignored (no write).
+  // (c) a non-subscription billing_reason is ignored (no write), basil shape.
   const oneOff = fakeDb({ sponsorRow: { id: "sp_1", stripe_subscription_id: "sub_123" } });
   const outOneOff = await handleStripeEvent(oneOff.client, {
     id: "evt_inv_manual",
     type: "invoice.paid",
-    data: { object: { customer: "cus_abc", subscription: "sub_123", billing_reason: "manual" } },
+    data: {
+      object: {
+        customer: "cus_abc",
+        billing_reason: "manual",
+        parent: { subscription_details: { subscription: "sub_123" } },
+      },
+    },
   });
   expect(outOneOff).toEqual({ handled: false });
   expect(oneOff.updates).toHaveLength(0);
 
-  // (d) an invoice for a DIFFERENT subscription than the sponsor's current one is ignored.
+  // (d) an invoice for a DIFFERENT subscription than the sponsor's current one is ignored, basil shape.
   const mismatch = fakeDb({ sponsorRow: { id: "sp_1", stripe_subscription_id: "sub_123" } });
   const outMismatch = await handleStripeEvent(mismatch.client, {
     id: "evt_inv_other",
     type: "invoice.paid",
-    data: { object: { customer: "cus_abc", subscription: "sub_OTHER", billing_reason: "subscription_cycle" } },
+    data: {
+      object: {
+        customer: "cus_abc",
+        billing_reason: "subscription_cycle",
+        parent: { subscription_details: { subscription: "sub_OTHER" } },
+      },
+    },
   });
   expect(outMismatch).toEqual({ handled: false });
   expect(mismatch.updates).toHaveLength(0);
+});
+
+test("CAUSE G legacy fallback: invoice.paid still correlates when subscription lives at the legacy object.subscription field", async () => {
+  // Pre-basil API versions (and any legacy-shaped payload) put the subscription id directly on
+  // object.subscription, with no `parent` at all. The basil path must fall back to this.
+  const legacy = fakeDb({ sponsorRow: { id: "sp_1", stripe_subscription_id: "sub_legacy" } });
+  const out = await handleStripeEvent(legacy.client, {
+    id: "evt_inv_legacy",
+    type: "invoice.paid",
+    data: {
+      object: { customer: "cus_abc", subscription: "sub_legacy", billing_reason: "subscription_cycle" },
+    },
+  });
+  expect(out).toEqual({ handled: true });
+  expect(legacy.updates[0].values).toMatchObject({ subscription_status: "active" });
+});
+
+test("CAUSE G: basil's parent.subscription_details.subscription takes priority over a stale legacy object.subscription", async () => {
+  // Defensive: if BOTH fields are somehow present and disagree, the basil field must win (it's read
+  // FIRST) — proves this isn't accidentally reading legacy first and falling through.
+  const both = fakeDb({ sponsorRow: { id: "sp_1", stripe_subscription_id: "sub_basil" } });
+  const out = await handleStripeEvent(both.client, {
+    id: "evt_inv_both",
+    type: "invoice.paid",
+    data: {
+      object: {
+        customer: "cus_abc",
+        subscription: "sub_stale_legacy", // does NOT match the sponsor's current sub
+        billing_reason: "subscription_cycle",
+        parent: { subscription_details: { subscription: "sub_basil" } }, // DOES match
+      },
+    },
+  });
+  expect(out).toEqual({ handled: true });
+  expect(both.updates[0].values).toMatchObject({ subscription_status: "active" });
 });
 
 test("an uninteresting event type is ignored (no DB write, handled:false)", async () => {

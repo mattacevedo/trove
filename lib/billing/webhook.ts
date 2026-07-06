@@ -52,6 +52,12 @@
 //     (console.error, greppable "REFUSING to adopt second subscription") and returns
 //     { handled: false } with no write. Re-activation after a prior deletion (the sponsor's current
 //     id is null) and idempotent re-delivery of the SAME subscription id both still write normally.
+//   • Basil invoice shape: under apiVersion 2025-06-30.basil, Invoice.subscription no longer exists —
+//     for a subscription-generated invoice the subscription id lives at
+//     parent.subscription_details.subscription. invoiceSubscriptionId() reads that FIRST, falling
+//     back to the legacy top-level `subscription` field only if it's absent. billing_reason
+//     correlation and the "must match the sponsor's CURRENT stripe_subscription_id" check are
+//     otherwise unchanged.
 //   • Ledger-loses-failed-events safety: recordEvent inserts event.id BEFORE any side effects run,
 //     so if the dispatch switch throws AFTER that insert succeeds (a live Stripe read fails, a DB
 //     write fails, etc.), the ledger would otherwise say "seen" for an event we never actually
@@ -85,6 +91,19 @@ function firstPriceId(object: Record<string, unknown>): string | null {
   const items = object.items as { data?: Array<Record<string, unknown>> } | undefined;
   const price = items?.data?.[0]?.price as { id?: unknown } | undefined;
   return asString(price?.id);
+}
+
+/**
+ * Read an Invoice's subscription id. Under apiVersion 2025-06-30.basil (lib/billing/stripe.ts's
+ * STRIPE_API_VERSION), Stripe removed Invoice.subscription in favor of a polymorphic `parent` object;
+ * for subscription-generated invoices the id now lives at parent.subscription_details.subscription.
+ * Read that FIRST — it is authoritative under the pinned API version — and fall back to the legacy
+ * top-level `subscription` field only if it's absent (defensive: an older/differently-shaped payload).
+ */
+function invoiceSubscriptionId(object: Record<string, unknown>): string | null {
+  const parent = object.parent as { subscription_details?: { subscription?: unknown } } | undefined;
+  const basil = asString(parent?.subscription_details?.subscription);
+  return basil ?? asString(object.subscription);
 }
 
 /** Resolve {id, stripe_subscription_id} for a Stripe customer; null if no sponsor matches. */
@@ -282,7 +301,7 @@ async function dispatch(
     case "invoice.paid":
     case "invoice.payment_failed": {
       const customerId = asString(object.customer);
-      const invoiceSub = asString(object.subscription);
+      const invoiceSub = invoiceSubscriptionId(object);
       const billingReason = asString(object.billing_reason);
       if (!customerId) return { handled: false };
 
