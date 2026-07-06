@@ -53,11 +53,18 @@ request headers), so **no code changes** are needed to change domains. Three con
 5. Until steps 1–3 are done, `/api/stripe/webhook` responds 500 (fail-closed — the Stripe
    client can't construct without its key) and checkout shows `price_not_configured`.
 
-## Postmark go-live checklist (invite emails)
+## Postmark go-live checklist (invite emails AND auth emails)
 
 1. Verify a sender domain/signature in Postmark.
-2. Set `POSTMARK_SERVER_TOKEN` in Vercel (prod), redeploy.
+2. Set `POSTMARK_SERVER_TOKEN` in Vercel (prod), redeploy — enables cohort invite emails.
 3. The invite sender uses `https://api.postmarkapp.com/email` directly (no SDK).
+4. **Also configure Supabase Auth SMTP with the same Postmark account** (dashboard →
+   Auth → SMTP, or Management API `PATCH /config/auth` with `smtp_host
+   smtp.postmarkapp.com`, port 587, user AND pass = the Postmark server token, plus a
+   verified `smtp_admin_email` sender). Then raise `rate_limit_email_sent` (e.g. 100/hr).
+   **Until this is done, sign-in emails use Supabase's built-in DEV mailer, capped at
+   2 emails/hour project-wide** — fine for solo testing, unusable for a pilot. The login
+   page surfaces this as a "too many sign-in emails" message (HTTP 429).
 
 ## Known caveats
 
