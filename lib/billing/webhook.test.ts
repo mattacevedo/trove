@@ -337,7 +337,10 @@ test("CAUSE A regression: the STALE-guard path (mismatched sub id) does NOT reco
 });
 
 test("customer.subscription.deleted marks the sponsor canceled and clears the subscription id", async () => {
-  const { client, updates } = fakeDb();
+  // CAUSE D: the deleted branch now scopes on the sponsor's CURRENT stripe_subscription_id, so the
+  // fixture must carry a sponsor row whose current sub id matches the event's (sub_123) for the
+  // terminal write to apply — mirrors how the updated branch's tests are already set up.
+  const { client, updates } = fakeDb({ sponsorRow: { id: "sp_1", stripe_subscription_id: "sub_123" } });
   const out = await handleStripeEvent(client, {
     id: "evt_deleted_1",
     type: "customer.subscription.deleted",
@@ -349,6 +352,46 @@ test("customer.subscription.deleted marks the sponsor canceled and clears the su
     stripe_subscription_id: null,
   });
   expect(updates[0].eqVal).toBe("cus_abc");
+});
+
+test("CAUSE D: customer.subscription.deleted for an unknown customer is handled:false with no write (consistent with updated/invoice)", async () => {
+  const { client, updates } = fakeDb({ sponsorRow: null });
+  const out = await handleStripeEvent(client, {
+    id: "evt_deleted_unknown_customer",
+    type: "customer.subscription.deleted",
+    data: { object: { id: "sub_123", customer: "cus_unknown", status: "canceled", items: { data: [] } } },
+  });
+  expect(out).toEqual({ handled: false });
+  expect(updates).toHaveLength(0);
+});
+
+test("CAUSE D: a late/out-of-order 'deleted' for an OLD (already-replaced) subscription does NOT clear a sponsor whose NEW subscription is active", async () => {
+  // The sponsor's CURRENT subscription is sub_NEW (a fresh checkout happened since sub_OLD was
+  // provisioned). A late 'deleted' webhook for sub_OLD must be recognized as stale and must NOT wipe
+  // out the sponsor's active new subscription.
+  const { client, updates } = fakeDb({ sponsorRow: { id: "sp_1", stripe_subscription_id: "sub_NEW" } });
+  const out = await handleStripeEvent(client, {
+    id: "evt_deleted_stale_old_sub",
+    type: "customer.subscription.deleted",
+    data: { object: { id: "sub_OLD", customer: "cus_abc", status: "canceled", items: { data: [] } } },
+  });
+  expect(out).toEqual({ handled: false });
+  expect(updates).toHaveLength(0); // no write at all — the row is untouched
+});
+
+test("CAUSE D: a 'deleted' event whose subscription id matches the sponsor's CURRENT one still clears it normally", async () => {
+  const { client, updates } = fakeDb({ sponsorRow: { id: "sp_1", stripe_subscription_id: "sub_CURRENT" } });
+  const out = await handleStripeEvent(client, {
+    id: "evt_deleted_matching",
+    type: "customer.subscription.deleted",
+    data: { object: { id: "sub_CURRENT", customer: "cus_abc", status: "canceled", items: { data: [] } } },
+  });
+  expect(out).toEqual({ handled: true });
+  expect(updates).toHaveLength(1);
+  expect(updates[0].values).toMatchObject({
+    subscription_status: "canceled",
+    stripe_subscription_id: null,
+  });
 });
 
 test("a stale customer.subscription.updated after deletion does NOT re-activate (terminal)", async () => {

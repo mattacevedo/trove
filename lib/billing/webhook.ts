@@ -21,9 +21,16 @@
 //          status is never trusted, and neither is its price: plan is derived from
 //          planForPriceId(<LIVE item's price id>), falling back to the event payload's price only
 //          if the live item lacks one (defensive — StripeLike types price as optional).
-//   • Terminal delete: customer.subscription.deleted sets 'canceled' + clears the id. Combined with
-//     the local terminality guard above, a later 'updated' for that same (now-stale) subscription id
-//     cannot resurrect it — regardless of what its live retrieve reports.
+//   • Terminal delete: customer.subscription.deleted resolves the sponsor FIRST and only clears
+//     (sets 'canceled' + nulls stripe_subscription_id) when the event's subscription id matches the
+//     sponsor's CURRENT one — the same local terminality scoping the updated branch applies. Without
+//     this, a late/out-of-order 'deleted' for an OLD (already-replaced) subscription would wrongly
+//     clear a sponsor whose NEW subscription is already active, since stripe_customer_id alone does
+//     not distinguish which subscription generation an event is about. Combined with the updated
+//     branch's own guard, a later 'updated' for that same (now-stale) subscription id also cannot
+//     resurrect it — regardless of what its live retrieve reports.
+//   • Unknown/stale subscription.deleted: like updated, an unknown customer or a subscription id that
+//     no longer matches the sponsor's current one returns { handled: false } with no write.
 //   • Plan label comes from the stable PLAN_BY_PRICE_ID map (price.id), never price.nickname.
 //   • Seats: sponsors.seats is written EXCLUSIVELY by syncSubscriptionSeats (lib/billing/seats.ts) —
 //     this module never writes the `seats` column directly. customer.subscription.updated calls
@@ -223,7 +230,22 @@ async function dispatch(
 
     case "customer.subscription.deleted": {
       const customerId = asString(object.customer);
+      const subscriptionId = asString(object.id);
       if (!customerId) return { handled: false };
+
+      // Resolve the sponsor first (consistent with created/updated/invoice) so we can scope the
+      // clear to the sponsor's CURRENT subscription — mirrors the updated branch's local terminality
+      // guard. Without this, a late/out-of-order 'deleted' for an OLD (already-replaced) subscription
+      // would wrongly clear a sponsor that has since started a NEW active subscription, keyed only by
+      // stripe_customer_id (which does not change across subscriptions).
+      const sponsor = await sponsorForCustomer(db, customerId);
+      if (!sponsor) return { handled: false };
+
+      if (!subscriptionId || sponsor.stripeSubscriptionId !== subscriptionId) {
+        // Stale relative to what we already know locally — do not touch the row.
+        return { handled: false };
+      }
+
       // Terminal: canceled + cleared id. A later stale 'updated' for this same subscription id
       // cannot re-activate it — the updated branch's local terminality guard rejects any event whose
       // subscription id no longer matches the sponsor's current stripe_subscription_id (now null).
